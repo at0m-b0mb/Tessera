@@ -1,0 +1,7 @@
+# Runtime
+cryptography>=3.4      # local key generation - the core security property
+
+# Optional but recommended
+PyQt6>=6.4             # desktop application  (pip install tessera-vpn[gui])
+rich>=12.0             # nicer CLI output     (falls back to plain ANSI)
+qrcode>=7.0            # QR codes for phones  (falls back to a text notice)

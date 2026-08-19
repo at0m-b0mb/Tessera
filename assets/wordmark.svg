@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 160" width="640" height="160" role="img" aria-label="Tessera - Two halves of one token.">
+  <title>Tessera</title>
+  <defs>
+    <linearGradient id="l" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#E0A868"/>
+      <stop offset="1" stop-color="#C88A4A"/>
+    </linearGradient>
+    <linearGradient id="r" x1="0.4" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8A5F33"/>
+      <stop offset="1" stop-color="#5E4022"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="160" fill="#0B0D10"/>
+  <g transform="translate(40,36)">
+    <path d="M 0.00 0.00 L 39.60 0.00 L 51.04 13.20 L 29.04 25.52 L 53.68 39.60 L 26.40 51.92 L 50.16 64.24 L 30.80 76.56 L 39.60 88.00 L 0.00 88.00 Z" fill="url(#l)"/>
+    <path d="M 88.00 0.00 L 48.40 0.00 L 59.84 13.20 L 37.84 25.52 L 62.48 39.60 L 35.20 51.92 L 58.96 64.24 L 39.60 76.56 L 48.40 88.00 L 88.00 88.00 Z" fill="url(#r)"/>
+  </g>
+  <text x="156" y="82" font-family="Inter, Segoe UI, Helvetica, sans-serif"
+        font-size="46" font-weight="700" letter-spacing="3" fill="#E8E4DC">TESSERA</text>
+  <text x="158" y="112" font-family="Inter, Segoe UI, Helvetica, sans-serif"
+        font-size="17" fill="#6B7280">Two halves of one token.</text>
+</svg>

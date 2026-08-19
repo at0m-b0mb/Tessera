@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+
+# Never commit generated client configuration - it contains private keys.
+tessera-clients/
+*.ovpn
+*.conf
+!tessera/**/*.conf

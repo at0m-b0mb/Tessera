@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Tessera">
+  <title>Tessera</title>
+  <defs>
+    <linearGradient id="l" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#E0A868"/>
+      <stop offset="1" stop-color="#C88A4A"/>
+    </linearGradient>
+    <linearGradient id="r" x1="0.4" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8A5F33"/>
+      <stop offset="1" stop-color="#5E4022"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="23" fill="#0B0D10"/>
+  <path d="M 0.00 0.00 L 57.60 0.00 L 74.24 19.20 L 42.24 37.12 L 78.08 57.60 L 38.40 75.52 L 72.96 93.44 L 44.80 111.36 L 57.60 128.00 L 0.00 128.00 Z" fill="url(#l)"/>
+  <path d="M 128.00 0.00 L 70.40 0.00 L 87.04 19.20 L 55.04 37.12 L 90.88 57.60 L 51.20 75.52 L 85.76 93.44 L 57.60 111.36 L 70.40 128.00 L 128.00 128.00 Z" fill="url(#r)"/>
+</svg>

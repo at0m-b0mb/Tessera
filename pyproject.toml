@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tessera-vpn"
+version = "1.0.0"
+description = "Install, configure and remove WireGuard, OpenVPN and Tailscale on any Linux server - from any desktop."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "at0m-b0mb" }]
+keywords = ["vpn", "wireguard", "openvpn", "tailscale", "installer",
+            "self-hosted", "security", "sysadmin"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Networking",
+    "Topic :: Security",
+]
+
+# Deliberately small.  'cryptography' is what lets client keys be generated on
+# your own machine instead of the server, which is the security property the
+# whole design rests on.  Everything else degrades gracefully if absent.
+dependencies = [
+    "cryptography>=3.4",
+]
+
+[project.optional-dependencies]
+gui = ["PyQt6>=6.4"]
+cli = ["rich>=12.0"]
+qr  = ["qrcode>=7.0"]
+all = ["PyQt6>=6.4", "rich>=12.0", "qrcode>=7.0"]
+dev = ["PyQt6>=6.4", "rich>=12.0", "qrcode>=7.0", "pytest>=7.0", "ruff>=0.1"]
+
+[project.scripts]
+tessera = "tessera.cli.main:main"
+
+[project.gui-scripts]
+tessera-gui = "tessera.gui.app:main"
+
+[project.urls]
+Homepage = "https://github.com/at0m-b0mb/Tessera"
+Source = "https://github.com/at0m-b0mb/Tessera"
+Issues = "https://github.com/at0m-b0mb/Tessera/issues"
+
+[tool.setuptools.packages.find]
+include = ["tessera*"]
+
+[tool.setuptools.package-data]
+tessera = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = ["E501", "B008", "SIM105"]
