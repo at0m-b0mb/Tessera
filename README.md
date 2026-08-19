@@ -1,12 +1,15 @@
 <div align="center">
 
-<img src="assets/banner.svg" alt="Tessera" width="100%">
+<img src="assets/banner.png" alt="Tessera" width="100%">
 
 **Install, configure and remove WireGuard, OpenVPN and Tailscale on any Linux server — from any desktop.**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-C88A4A.svg)](LICENSE)
-[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-C88A4A.svg)](https://www.python.org/)
-[![Platform](https://img.shields.io/badge/Runs%20on-macOS%20%7C%20Windows%20%7C%20Linux-C88A4A.svg)]()
+[![Release](https://img.shields.io/github/v/release/at0m-b0mb/Tessera?color=C88A4A&labelColor=12151A)](https://github.com/at0m-b0mb/Tessera/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/at0m-b0mb/Tessera/ci.yml?branch=main&color=C88A4A&labelColor=12151A&label=CI)](https://github.com/at0m-b0mb/Tessera/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-C88A4A?labelColor=12151A)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-C88A4A?labelColor=12151A)](https://www.python.org/)
+[![Runs on](https://img.shields.io/badge/Runs%20on-macOS%20%7C%20Windows%20%7C%20Linux-C88A4A?labelColor=12151A)](#quick-start)
+[![No agent](https://img.shields.io/badge/Server%20side-no%20agent%20installed-5BC98C?labelColor=12151A)](#how-it-works)
 
 [Quick start](#quick-start) · [How it works](#how-it-works) · [Why it is built this way](#four-decisions-that-shape-everything) · [CLI](#the-cli) · [Uninstalling](#uninstalling)
 
@@ -425,6 +428,38 @@ or create TUN devices, and it will say so before installing anything instead of
 failing halfway.
 
 ---
+
+## How this compares to the scripts it learned from
+
+[`wireguard-install`](https://github.com/angristan/wireguard-install) and
+[`openvpn-install`](https://github.com/angristan/openvpn-install) are excellent,
+and if you want one file you can `curl` onto a box and read in ten minutes, use
+them. They are the reference for this project and Tessera would have been much
+harder without them.
+
+Tessera is a different shape, and the trade is real:
+
+| | angristan's scripts | Tessera |
+|---|---|---|
+| **Install footprint** | one bash file on the server | nothing on the server |
+| **Where you run it** | on the server, as root | on your laptop, over SSH |
+| **Engines** | one script each | all three, together, one inventory |
+| **Client private keys** | generated on the server, stored there | generated on your machine, never sent |
+| **See changes first** | read the script | `--dry-run` prints the exact plan |
+| **On failure** | whatever the first N lines did | rolls back completed steps |
+| **Uninstall** | a fixed list the author wrote | inventory of what *this* install created |
+| **Pre-existing packages** | removed if on the list | never touched |
+| **Interface** | a numbered bash menu | desktop app + CLI, same engine |
+| **Auditing** | — | read-only posture check, exit code for CI |
+| **Dependency** | bash | Python 3.9 + `cryptography` |
+| **Reading it end to end** | very achievable | ~9,000 lines |
+
+**Pick theirs if** you want minimum moving parts, you are already on the box, or
+you want to audit every line yourself before running it.
+
+**Pick Tessera if** you manage more than one server, you want the removal to be
+trustworthy, you want client keys that never touch the server, or you want
+something a non-sysadmin colleague can actually use.
 
 ## Credits
 
