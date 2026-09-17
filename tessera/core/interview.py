@@ -516,6 +516,23 @@ def fill_defaults(spec: InstallSpec, facts: Facts) -> InstallSpec:
     return spec
 
 
+def prepare(spec: InstallSpec, facts: Facts, **answers: Any) -> InstallSpec:
+    """Set some answers, then fill the rest with defaults.
+
+    The one safe way to build a spec programmatically.  Assigning to
+    ``spec.engines`` and *then* calling ``fill_defaults`` looks equivalent and
+    is not: the default would overwrite it, because nothing recorded that you
+    had made a choice.  That bug shipped once already and was invisible until
+    someone checked which engines actually got installed.
+
+        spec = interview.prepare(spec, facts, engines=["openvpn"],
+                                 first_peer="laptop")
+    """
+    for key, value in answers.items():
+        set_value(spec, key.replace("__", "."), value, record=True)
+    return fill_defaults(spec, facts)
+
+
 def mark_answered(spec: InstallSpec, *keys: str) -> InstallSpec:
     """Protect values set outside the interview, e.g. by a command-line flag."""
     for k in keys:

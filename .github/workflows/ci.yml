@@ -32,15 +32,42 @@ jobs:
       - name: Lifecycle tests
         run: python tests/test_lifecycle.py
 
+      - name: Adoption tests
+        run: python tests/test_adopt.py
+
+      - name: Fleet, expiry, backup and drift tests
+        run: python tests/test_v11.py
+
+      - name: Security regression tests
+        run: python tests/test_security.py
+
       - name: CLI smoke test against the simulated server
+        # bash on every runner: the Windows default is PowerShell, where
+        # `> /dev/null` and `|| true` are not valid.
+        shell: bash
         run: |
           python -m tessera --version
           python -m tessera doctor demo
+          python -m tessera demo reset
           python -m tessera install demo --yes --engine wireguard --dry-run
           python -m tessera install demo --yes -e wireguard -e openvpn --no-qr -o ./out
           python -m tessera status demo
-          python -m tessera audit demo || true
+          python -m tessera peer add guest --expires 14d -e wireguard --no-qr -o ./out demo
+          python -m tessera peer list demo
+          python -m tessera verify demo
+          python -m tessera watch demo --once
+          python -m tessera audit demo
+          python -m tessera servers add ci root@ci.example.com
+          python -m tessera servers list
+          python -m tessera servers list --names
+          python -m tessera servers remove ci
+          python -m tessera completions bash > /dev/null
+          python -m tessera completions zsh > /dev/null
+          python -m tessera completions fish > /dev/null
+          # Dry run before the real thing: afterwards there is nothing left to
+          # remove and the command correctly exits non-zero.
           python -m tessera uninstall demo --dry-run
+          python -m tessera uninstall demo -y
 
       - name: Generated configs must not be empty
         shell: bash

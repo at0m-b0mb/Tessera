@@ -297,7 +297,18 @@ class OpenVPNEngine(Engine):
         key_pem, csr_pem = generate_client_csr(
             name, curve=cfg.cert_curve, rsa_bits=cfg.rsa_bits, algo=cfg.cert_type)
 
+        access_expires = options.get("access_expires", "")
+        # A time-limited guest gets a certificate that lapses on the same day.
+        # Revocation still runs on schedule, but the cryptography is the real
+        # enforcement: an expired certificate is refused with no help from us.
+        lifetime = cfg.client_cert_days
+        if access_expires:
+            from ..expiry import cert_days
+            lifetime = cert_days(access_expires)
+
         peer = Peer(name=name, engine=self.name, private_key=key_pem,
+                    access_expires=access_expires,
+                    expires=access_expires or "",
                     note=options.get("note", ""))
         remote_csr = "{}/tessera-{}.req".format(EASYRSA_DIR, name)
 
@@ -319,7 +330,7 @@ class OpenVPNEngine(Engine):
                      "rm -f {req}\n").format(
                          d=shlex.quote(EASYRSA_DIR),
                          req=shlex.quote(remote_csr), n=shlex.quote(name),
-                         days=cfg.client_cert_days),
+                         days=lifetime),
             undo=("cd {d} && ./easyrsa --batch revoke {n} 2>/dev/null; "
                   "true").format(d=shlex.quote(EASYRSA_DIR), n=shlex.quote(name)),
             timeout=180,

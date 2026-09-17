@@ -14,11 +14,14 @@ import sys
 from typing import List, Optional
 
 from .. import __version__, branding
+from ..core import expiry as expiry_mod
+from ..core import fleet
 from ..core import interview as iv
 from ..core import qr as qr_mod
 from ..core.audit import tally, verdict
 from ..core.errors import TesseraError
-from ..core.manager import Session, quick_target
+from ..core.manager import Session
+from ..core import backup as backup_mod
 from ..core.models import InstallSpec
 from ..core.plan import Plan, Step, StepStatus
 from ..core.state import summary_line
@@ -32,7 +35,10 @@ EXIT_OK, EXIT_ERROR, EXIT_BLOCKED, EXIT_AUDIT_FAILED = 0, 1, 2, 3
 # Shared plumbing
 # --------------------------------------------------------------------------- #
 def connect(ui: UI, args) -> Session:
-    target = quick_target(getattr(args, "target", "") or "")
+    raw = getattr(args, "target", "") or ""
+    # A saved nickname wins over a hostname. The two namespaces cannot overlap
+    # because a nickname may not contain @ : or / - see fleet.validate_name.
+    target = fleet.resolve(raw)
     if getattr(args, "user", ""):
         target.user = args.user
     if getattr(args, "port", 0):
@@ -48,8 +54,10 @@ def connect(ui: UI, args) -> Session:
         password = os.environ["TESSERA_SUDO_PASSWORD"]
 
     ui.info("Inspecting {} ...".format(target.display()))
-    session = Session.connect(target, sudo_password=password,
-                              resolve_public_ip=not getattr(args, "offline", False))
+    session = Session.connect(
+        target, sudo_password=password,
+        resolve_public_ip=not getattr(args, "offline", False),
+        strict_host_keys=getattr(args, "strict_host_keys", False))
     if session.can_root:
         ui.ok("{}  -  {}".format(session.facts.summary(),
                                  summary_line(session.state)))
@@ -58,6 +66,25 @@ def connect(ui: UI, args) -> Session:
         ui.warn("No root on this target: {}".format(session.state_error))
         ui.note("Read-only commands still work. To make changes, re-run with "
                 "--ask-sudo-password or connect as root.")
+    if target.label:
+        fleet.touch(target.label, os_summary=session.facts.summary(),
+                    engines=session.state.installed_engines)
+    # Anything the server revoked on its own while we were away.
+    try:
+        expired = session.reconcile_expiries()
+        for entry in expired:
+            ui.info("'{}' expired on {} and was revoked automatically.".format(
+                entry["name"], entry["expired"]))
+    except Exception:                                          # noqa: BLE001
+        pass
+    soon = []
+    try:
+        soon = session.expiring_soon(7)
+    except Exception:                                          # noqa: BLE001
+        pass
+    for peer in soon:
+        ui.warn("'{}' {}.".format(peer.name,
+                                  expiry_mod.describe(peer.access_expires)))
     return session
 
 
@@ -235,9 +262,14 @@ def cmd_status(ui: UI, args) -> int:
         if info.get("error"):
             ui.warn(info["error"])
         rows = []
+        # Map keys back to the names people actually gave their devices;
+        # "jnkHuFtFeMUKicYK..." tells you nothing about whose phone that is.
+        known = {peer.public_key: peer.name
+                 for peer in session.list_peers(name) if peer.public_key}
         for p in info.get("peers", []):
             if name == "wireguard":
-                rows.append([p.get("public_key", "")[:16] + "...",
+                key = p.get("public_key", "")
+                rows.append([known.get(key) or (key[:16] + "..."),
                              p.get("allowed_ips", ""),
                              human_age(p.get("last_handshake", 0)),
                              "{} / {}".format(human_bytes(p.get("rx_bytes", 0)),
@@ -252,7 +284,7 @@ def cmd_status(ui: UI, args) -> int:
                              ", ".join(p.get("addresses", [])),
                              "online" if p.get("online") else "offline",
                              p.get("os", "")])
-        headers = {"wireguard": ["Key", "Allowed IPs", "Handshake", "Rx / Tx"],
+        headers = {"wireguard": ["Peer", "Allowed IPs", "Handshake", "Rx / Tx"],
                    "openvpn": ["Name", "VPN address", "Since", "Rx / Tx"],
                    "tailscale": ["Name", "Addresses", "State", "OS"]}[name]
         ui.table(headers, rows)
@@ -289,15 +321,28 @@ def cmd_peer(ui: UI, args) -> int:
             ui.out()
             ui.rule("{} - {} peer{}".format(name, len(peers),
                                             "" if len(peers) == 1 else "s"))
-            ui.table(["Name", "Address", "Created", "State"],
-                     [[p.name, p.address_v4 or p.fingerprint[:23] or "-",
-                       p.created[:10], "revoked" if p.revoked else "active"]
-                      for p in peers])
+            rows = []
+            for p in peers:
+                if p.revoked:
+                    state = "revoked"
+                elif p.access_expires:
+                    state = expiry_mod.describe(p.access_expires)
+                else:
+                    state = "active"
+                rows.append([p.name,
+                             p.address_v4 or p.fingerprint[:23] or "-",
+                             p.created[:10], state, p.note or ""])
+            ui.table(["Name", "Address", "Created", "State", "Note"], rows)
         return EXIT_OK
 
     if args.action == "add":
-        peer, config = session.add_peer(engine, args.name)
+        peer, config = session.add_peer(
+            engine, args.name, expires=args.expires, note=args.note)
         ui.ok("Added '{}' to {}".format(args.name, engine))
+        if peer.access_expires:
+            ui.info("Access {} ({}), revoked automatically by the server."
+                    .format(expiry_mod.describe(peer.access_expires),
+                            peer.access_expires))
         if peer.address_v4:
             ui.note("VPN address {}".format(peer.address_v4))
         if peer.expires:
@@ -466,6 +511,345 @@ def cmd_export(ui: UI, args) -> int:
     return EXIT_ERROR
 
 
+
+def cmd_servers(ui: UI, args) -> int:
+    """The address book. No secrets live here - see core/fleet.py."""
+    if args.action == "list":
+        book = fleet.load()
+        if args.names:
+            for name in book.names():
+                print(name)
+            return EXIT_OK
+        servers = book.all()
+        if not servers:
+            ui.warn("No servers saved yet.")
+            ui.note("tessera servers add prod root@vpn.example.com")
+            return EXIT_OK
+        rows = []
+        for srv in servers:
+            rows.append([srv.name, srv.display(),
+                         srv.last_os or "-",
+                         ", ".join(srv.last_engines) or "-",
+                         (srv.last_seen or "never")[:10],
+                         srv.note or ""])
+        ui.table(["Name", "Target", "Last seen OS", "Engines", "Seen", "Note"],
+                 rows)
+        ui.out()
+        ui.note("Stored at {} (mode 0600). It holds no keys or "
+                "passwords.".format(fleet.path()))
+        return EXIT_OK
+
+    if args.action == "add":
+        if not args.name or not args.location:
+            ui.fail("usage: tessera servers add <name> <user@host[:port]>")
+            return EXIT_ERROR
+        srv = fleet.add(args.name, args.location, note=args.note,
+                        tags=args.tag or [], identity=args.identity,
+                        overwrite=args.force)
+        ui.ok("Saved '{}' -> {}".format(srv.name, srv.display()))
+        ui.note("Use it anywhere a target is accepted: tessera status {}"
+                .format(srv.name))
+        return EXIT_OK
+
+    if args.action == "remove":
+        fleet.remove(args.name)
+        ui.ok("Removed '{}' from the server book.".format(args.name))
+        ui.note("Nothing on the server itself was touched.")
+        return EXIT_OK
+    return EXIT_ERROR
+
+
+def cmd_adopt(ui: UI, args) -> int:
+    """Take over a VPN that something else installed."""
+    session = connect(ui, args)
+    ui.rule("Looking for an existing VPN")
+    found = session.discover()
+    if not found:
+        ui.warn("No WireGuard, OpenVPN or Tailscale install found here.")
+        ui.note("If you expected one, check it is in the usual place: "
+                "/etc/wireguard or /etc/openvpn/server.")
+        return EXIT_OK
+
+    already = set(session.state.installed_engines)
+    for line in adopt_summary(found):
+        ui.ok(line)
+    new = [k for k in found if k not in already]
+    if not new:
+        ui.out()
+        ui.info("Tessera already manages everything it found here.")
+        return EXIT_OK
+    if already:
+        ui.note("Already managed, will be left alone: {}".format(
+            ", ".join(sorted(already))))
+
+    ui.out()
+    ui.info("Adopting writes an inventory describing what is already here.")
+    ui.note("Nothing on the server is changed, restarted or reconfigured.")
+    ui.note("Packages and system settings are recorded as pre-existing, so "
+            "'tessera uninstall' will never remove them.")
+    ui.out()
+    if not args.yes and not ui.confirm(
+            "Adopt {} on {}?".format(" and ".join(new), session.target.display()),
+            True):
+        ui.info("Nothing was changed.")
+        return EXIT_OK
+
+    engines, warnings = session.adopt(found)
+    ui.out()
+    ui.ok("Adopted {}".format(" and ".join(engines)))
+    for warning in warnings:
+        ui.warn(warning)
+    ui.out()
+    peers = session.list_peers()
+    ui.info("{} peer(s) imported. 'tessera status' and 'tessera peer add' "
+            "now work on this server.".format(len(peers)))
+    ui.note("Existing peers' private keys live on their own devices, as they "
+            "should, so Tessera cannot re-export their configs. New peers it "
+            "creates are unaffected.")
+    return EXIT_OK
+
+
+def adopt_summary(found):
+    from ..core.adopt import summarise
+    return summarise(found)
+
+
+def cmd_verify(ui: UI, args) -> int:
+    """Has anything drifted from the inventory?"""
+    session = connect(ui, args)
+    ui.rule("Verifying {}".format(session.target.display()))
+    findings = session.verify()
+    order = {"fail": 0, "warn": 1, "info": 2, "pass": 3}
+    for f in sorted(findings, key=lambda x: order.get(x.level, 9)):
+        {"fail": ui.fail, "warn": ui.warn, "info": ui.info,
+         "pass": ui.ok}[f.level](f.title)
+        if f.level in ("fail", "warn") or args.verbose:
+            for line in (f.detail or "").splitlines()[:8]:
+                ui.note("    " + line)
+            if f.remedy:
+                ui.note("    -> " + f.remedy)
+
+    problems = [f for f in findings if f.is_problem]
+    if not problems:
+        return EXIT_OK
+    if not args.fix:
+        ui.out()
+        plan = session.fixable()
+        if any(plan.values()):
+            ui.info("Some of this can be reconciled: 'tessera verify {} --fix'"
+                    .format(args.target or ""))
+        return EXIT_AUDIT_FAILED
+
+    plan = session.fixable()
+    ui.out()
+    ui.rule("Repair")
+    if not any(plan.values()):
+        ui.warn("Nothing here can be fixed automatically.")
+        ui.note("Repair only ever edits Tessera's inventory. It will not add "
+                "or remove access on the server, because a repair tool that "
+                "can hand out access is one nobody should run unattended.")
+        return EXIT_AUDIT_FAILED
+    for name in plan["import"]:
+        ui.note("import into the inventory: {}".format(name))
+    for name in plan["forget"]:
+        ui.note("mark as revoked: {}".format(name))
+    ui.out()
+    if not args.yes and not ui.confirm("Apply these inventory changes?", True):
+        return EXIT_OK
+    changed = session.apply_fix()
+    for line in changed:
+        ui.ok(line)
+    ui.out()
+    ui.ok("Inventory reconciled. The server itself was not modified.")
+    return EXIT_OK
+
+
+def cmd_backup(ui: UI, args) -> int:
+    session = connect(ui, args)
+    ui.rule("Backing up {}".format(session.target.display()))
+    ui.info("The archive will contain private keys, including the OpenVPN CA "
+            "if there is one, so it is always encrypted.")
+    passphrase = _ask_passphrase(ui, confirm=True)
+
+    blob, manifest = session.backup(passphrase)
+    out = args.out or "tessera-{}-{}.backup".format(
+        (session.target.label or session.facts.os_id or "server"),
+        manifest.created[:10])
+    backup_mod.write(out, blob)
+    ui.out()
+    ui.ok("Wrote {} ({:.0f} KB)".format(out, len(blob) / 1024.0))
+    ui.kv([("contents", manifest.summary()),
+           ("paths", ", ".join(manifest.paths))])
+    ui.out()
+    ui.note("Keep this somewhere you would keep a password database. Anyone "
+            "with the file and the passphrase can impersonate your server.")
+    ui.note("Restore with: tessera restore {} <target>".format(out))
+    return EXIT_OK
+
+
+def cmd_restore(ui: UI, args) -> int:
+    blob = backup_mod.read(args.archive)
+    manifest = backup_mod.peek(blob)
+    ui.rule("Restore")
+    ui.kv([("archive", args.archive),
+           ("taken from", manifest.server or "unknown"),
+           ("on", manifest.created[:19].replace("T", " ")),
+           ("contents", manifest.summary()),
+           ("by", "Tessera {}".format(manifest.tessera_version or "?"))])
+    ui.out()
+
+    session = connect(ui, args)
+    existing = session.state.installed_engines
+    if existing and not args.force:
+        ui.fail("{} already runs {}.".format(
+            session.target.display(), " and ".join(existing)))
+        ui.note("Restoring would overwrite it. Pass --force if that is what "
+                "you want, after taking a backup of what is there now.")
+        return EXIT_BLOCKED
+
+    ui.warn("This overwrites {} on the target.".format(
+        ", ".join(manifest.paths)))
+    if args.dry_run:
+        payload, _ = backup_mod.unseal(blob, _ask_passphrase(ui))
+        ui.out()
+        ui.rule("Would restore")
+        for name in backup_mod.contents(payload)[:40]:
+            ui.note("  " + name)
+        ui.out()
+        ui.info("Dry run: nothing was written.")
+        return EXIT_OK
+
+    if not args.yes:
+        typed = ui.ask("Type RESTORE to confirm", "")
+        if typed != "RESTORE":
+            ui.info("Nothing was changed.")
+            return EXIT_OK
+
+    passphrase = _ask_passphrase(ui)
+    manifest, changes = session.restore(
+        blob, passphrase, new_endpoint=args.endpoint)
+    ui.out()
+    ui.ok("Restored {}".format(manifest.summary()))
+    for line in changes:
+        ui.info("endpoint updated - {}".format(line))
+    ui.out()
+    ui.warn("Start the services when you are ready:")
+    for engine in manifest.engines:
+        unit = {"wireguard": "wg-quick@wg0",
+                "openvpn": "openvpn-server@server",
+                "tailscale": "tailscaled"}.get(engine, engine)
+        ui.note("  systemctl enable --now {}".format(unit))
+    if args.endpoint:
+        ui.out()
+        ui.warn("Existing client configs still point at the old address.")
+        ui.note("Their keys are unchanged and still valid, but each device "
+                "needs its Endpoint line updated to {} before it will "
+                "connect. Tessera cannot edit files on other people's "
+                "machines.".format(args.endpoint))
+    return EXIT_OK
+
+
+def _ask_passphrase(ui: UI, confirm: bool = False) -> str:
+    import getpass
+    env = os.environ.get("TESSERA_BACKUP_PASSPHRASE")
+    if env:
+        return env
+    while True:
+        first = getpass.getpass("Passphrase: ")
+        if len(first) < 8:
+            ui.fail("Use at least 8 characters.")
+            continue
+        if not confirm:
+            return first
+        again = getpass.getpass("Passphrase again: ")
+        if first != again:
+            ui.fail("They do not match.")
+            continue
+        return first
+
+
+def cmd_watch(ui: UI, args) -> int:
+    """A live view of who is connected."""
+    import time
+    session = connect(ui, args)
+    if not session.state.installed_engines:
+        ui.fail("No Tessera-managed VPN on this server.")
+        return EXIT_ERROR
+    ui.out()
+    ui.note("Refreshing every {}s. Ctrl-C to stop.".format(args.interval))
+    try:
+        while True:
+            status = session.status()
+            lines = _render_watch(session, status)
+            sys.stdout.write("\033[H\033[J" if ui.color else "\n")
+            sys.stdout.write(lines)
+            sys.stdout.flush()
+            if args.once:
+                return EXIT_OK
+            time.sleep(max(2, args.interval))
+    except KeyboardInterrupt:
+        ui.out()
+        return EXIT_OK
+
+
+def _render_watch(session, status) -> str:
+    import time
+    out = []
+    out.append("{}  -  {}\n".format(session.target.display(),
+                                    time.strftime("%H:%M:%S")))
+    for name, info in status.items():
+        mark = "up" if info.get("active") else "DOWN"
+        peers = info.get("peers", [])
+        if name == "wireguard":
+            online = sum(1 for p in peers
+                         if p.get("last_handshake") and
+                         time.time() - p["last_handshake"] < 180)
+            out.append("\n  {}  {}  {} of {} peers active\n".format(
+                name, mark, online, len(peers)))
+            known = {p.public_key: p.name for p in session.list_peers(name)}
+            for p in peers:
+                out.append("    {:<16} {:<22} {:>10}  {:>10} down  {:>10} up\n"
+                           .format(known.get(p.get("public_key"), "?")[:16],
+                                   p.get("allowed_ips", "")[:22],
+                                   human_age(p.get("last_handshake", 0)),
+                                   human_bytes(p.get("rx_bytes", 0)),
+                                   human_bytes(p.get("tx_bytes", 0))))
+        else:
+            out.append("\n  {}  {}  {} peer(s)\n".format(name, mark, len(peers)))
+            for p in peers:
+                out.append("    {:<16} {}\n".format(
+                    str(p.get("name", ""))[:16],
+                    p.get("virtual_address") or
+                    ", ".join(p.get("addresses", []))))
+    if not any(status.values()):
+        out.append("\n  (nothing reporting)\n")
+    return "".join(out)
+
+
+def cmd_demo(ui: UI, args) -> int:
+    """Manage the simulated server."""
+    from ..core import demo
+    if args.action == "reset":
+        if demo.reset():
+            ui.ok("The simulated server is back to a clean Ubuntu 24.04 box.")
+        else:
+            ui.info("The simulated server was already clean.")
+        return EXIT_OK
+    ui.kv([("state file", demo.state_path()),
+           ("exists", "yes" if os.path.exists(demo.state_path()) else "no")])
+    ui.out()
+    ui.note("Try: tessera install demo   then   tessera status demo")
+    ui.note("Reset it with: tessera demo reset")
+    return EXIT_OK
+
+
+def cmd_completions(ui: UI, args) -> int:
+    """Print a shell completion script."""
+    from .completions import render
+    sys.stdout.write(render(args.shell, build_parser()))
+    return EXIT_OK
+
+
 def cmd_gui(ui: UI, args) -> int:
     try:
         from ..gui.app import main as gui_main
@@ -505,6 +889,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="prompt for the remote sudo password")
         sp.add_argument("--offline", action="store_true",
                         help="skip public IP lookup")
+        sp.add_argument("--strict-host-keys", action="store_true",
+                        help="refuse unknown SSH host keys instead of "
+                             "recording them on first use")
 
     # install
     sp = sub.add_parser("install", help="install and configure a VPN")
@@ -542,6 +929,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_target(sp)
     sp.add_argument("-e", "--engine", dest="engine_name",
                     choices=["wireguard", "openvpn", "tailscale"], default="")
+    sp.add_argument("--expires", default="",
+                    help="revoke automatically after this long: 14d, 2w, 6m, "
+                         "or a date like 2026-12-31")
+    sp.add_argument("--note", default="")
     sp.add_argument("-o", "--out", default="")
     sp.add_argument("--no-qr", action="store_true")
     sp.add_argument("-y", "--yes", action="store_true")
@@ -581,6 +972,72 @@ def build_parser() -> argparse.ArgumentParser:
     add_target(sp)
     sp.add_argument("-e", "--engine", dest="engine_name", default="")
     sp.set_defaults(func=cmd_export)
+
+    # servers
+    sp = sub.add_parser("servers", help="save and list the machines you manage")
+    sp.add_argument("action", choices=["list", "add", "remove"], nargs="?",
+                    default="list")
+    sp.add_argument("name", nargs="?", default="")
+    sp.add_argument("location", nargs="?", default="",
+                    help="user@host[:port] when adding")
+    sp.add_argument("--note", default="")
+    sp.add_argument("--tag", action="append")
+    sp.add_argument("-i", "--identity", default="")
+    sp.add_argument("--force", action="store_true", help="replace an existing entry")
+    sp.add_argument("--names", action="store_true",
+                    help="print names only, for shell completion")
+    sp.set_defaults(func=cmd_servers)
+
+    # adopt
+    sp = sub.add_parser("adopt",
+                        help="manage a VPN that another installer set up")
+    add_target(sp)
+    sp.add_argument("-y", "--yes", action="store_true")
+    sp.set_defaults(func=cmd_adopt)
+
+    # verify
+    sp = sub.add_parser("verify", help="check the server still matches the inventory")
+    add_target(sp)
+    sp.add_argument("--fix", action="store_true",
+                    help="reconcile the inventory (never changes the server)")
+    sp.add_argument("-y", "--yes", action="store_true")
+    sp.set_defaults(func=cmd_verify)
+
+    # backup
+    sp = sub.add_parser("backup", help="encrypted archive of keys and config")
+    add_target(sp)
+    sp.add_argument("-o", "--out", default="", help="output file")
+    sp.set_defaults(func=cmd_backup)
+
+    # restore
+    sp = sub.add_parser("restore", help="rebuild a server from a backup")
+    sp.add_argument("archive")
+    add_target(sp)
+    sp.add_argument("--endpoint", default="",
+                    help="new public address, when migrating to another host")
+    sp.add_argument("--force", action="store_true",
+                    help="overwrite an existing install")
+    sp.add_argument("--dry-run", action="store_true")
+    sp.add_argument("-y", "--yes", action="store_true")
+    sp.set_defaults(func=cmd_restore)
+
+    # watch
+    sp = sub.add_parser("watch", help="live view of who is connected")
+    add_target(sp)
+    sp.add_argument("--interval", type=int, default=5)
+    sp.add_argument("--once", action="store_true")
+    sp.set_defaults(func=cmd_watch)
+
+    # demo
+    sp = sub.add_parser("demo", help="the simulated server you can practise on")
+    sp.add_argument("action", choices=["info", "reset"], nargs="?",
+                    default="info")
+    sp.set_defaults(func=cmd_demo)
+
+    # completions
+    sp = sub.add_parser("completions", help="print a shell completion script")
+    sp.add_argument("shell", choices=["bash", "zsh", "fish"])
+    sp.set_defaults(func=cmd_completions)
 
     # gui
     sp = sub.add_parser("gui", help="launch the desktop application")

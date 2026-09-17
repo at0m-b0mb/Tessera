@@ -29,13 +29,6 @@ _RESPONSES = {
     r"wg --version": "wireguard-tools v1.0.20210914",
     r"openvpn --version": "OpenVPN 2.6.12 x86_64-pc-linux-gnu",
     r"tailscale version": "1.80.2",
-    r"wg show \S+ dump": (
-        "hK3vN9pQwXcR2mT7yB4jL8sF1dG6aZ0eV5nU3iO2kP4=\t(none)\t51820\toff\n"
-        "aB1cD2eF3gH4iJ5kL6mN7oP8qR9sT0uV1wX2yZ3aB4c=\t(psk)\t"
-        "198.51.100.22:41820\t10.66.66.2/32\t1755500000\t184320000\t"
-        "22150000\t25\n"
-        "cD3eF4gH5iJ6kL7mN8oP9qR0sT1uV2wX3yZ4aB5cD6e=\t(psk)\t(none)\t"
-        "10.66.66.3/32\t0\t0\t0\t25\n"),
     r"sshd -T": "port 22\npasswordauthentication no\npermitrootlogin prohibit-password\n",
     r"grep -c '\^Inst.*security'": "0",
     r"ss -tulnH": "22\n",
@@ -49,19 +42,56 @@ _RESPONSES = {
 }
 
 
+def state_path() -> str:
+    """Where the simulated server's disk lives between commands."""
+    from .fleet import config_dir
+    import os
+    return os.path.join(config_dir(), "demo-server.json")
+
+
+def reset() -> bool:
+    """Wipe the simulated server.  Returns True if there was anything to wipe."""
+    import os
+    p = state_path()
+    if os.path.exists(p):
+        os.remove(p)
+        return True
+    return False
+
+
 class DemoTransport(Transport):
-    """Answers plausibly, records everything, changes nothing."""
+    """Answers plausibly, records everything, changes nothing real.
+
+    Its virtual disk persists between commands, in a single JSON file beside
+    your config.  Without that, ``tessera install demo`` followed by ``tessera
+    peer add demo`` would fail, because the second command would meet a server
+    with no VPN on it - and the whole point of the demo is to let someone walk
+    the real workflow before they own a server.
+    """
 
     label = "demo (simulated Ubuntu 24.04 server)"
     is_root = True
 
-    def __init__(self) -> None:
+    def __init__(self, persist: bool = True) -> None:
         self.commands: List[str] = []
         self.files: Dict[str, str] = {}
+        self._persist = persist
+        if persist:
+            self._load()
 
     def run(self, command: str, *, check: bool = False, timeout: int = 300,
             sink=None, input_text: Optional[str] = None) -> CommandResult:
         self.commands.append(command)
+        import re as _re
+        dump = _re.search(r"wg show (\S+) dump", command)
+        if dump:
+            return CommandResult(
+                command, 0, self._wg_dump(dump.group(1).strip("'\"")), "", 0.02)
+        m = _re.match(r"^cat (?:-- )?(\S+)\s*$", command.strip())
+        if m:
+            path = m.group(1).strip("'\"")
+            if path in self.files:
+                return CommandResult(command, 0, self.files[path], "", 0.01)
         for pattern, output in _RESPONSES.items():
             if re.search(pattern, command):
                 if sink:
@@ -72,11 +102,113 @@ class DemoTransport(Transport):
             sink("out", "(demo) would run: {}".format(command.splitlines()[0][:110]))
         return CommandResult(command, 0, "", "", 0.02)
 
+    def _wg_dump(self, iface: str) -> str:
+        """Generate `wg show dump` from the config this server actually has.
+
+        A canned response would contradict whatever the user just configured -
+        different subnet, peers that do not exist - and the demo is supposed to
+        show people how the real thing behaves, not a postcard of it.
+        """
+        import time
+        from .adopt import parse_wg_conf
+        conf = self.files.get("/etc/wireguard/{}.conf".format(iface))
+        if not conf:
+            return ""
+        parsed = parse_wg_conf(conf)
+        rows = ["{}\t(none)\t{}\toff".format(
+            _RESPONSES[r"\bwg pubkey\b"], parsed["port"] or 51820)]
+        now = int(time.time())
+        for index, peer in enumerate(parsed["peers"]):
+            # First peer looks recently connected, the rest never have, so the
+            # dashboard shows both states.
+            handshake = (now - 47) if index == 0 else 0
+            rx, tx = (184320000, 22150000) if index == 0 else (0, 0)
+            rows.append("{}\t{}\t{}\t{}\t{}\t{}\t{}\t25".format(
+                peer["public_key"],
+                "(psk)" if peer["preshared_key"] else "(none)",
+                "198.51.100.22:41820" if index == 0 else "(none)",
+                ",".join(peer["allowed_ips"]), handshake, rx, tx))
+        return "\n".join(rows) + "\n"
+
     def run_root(self, command: str, **kw) -> CommandResult:
-        return self.run(command, **kw)
+        result = self.run(command, **kw)
+        self._apply_writes(command)
+        self._apply_removals(command)
+        return result
+
+    def _apply_writes(self, command: str) -> None:
+        """Honour simple `> /path` and `>> /path` redirects.
+
+        Several install steps create files with a redirect rather than through
+        write_file - `wg genkey > key`, `printf ... >> sysctl.conf`. Without
+        modelling those, `tessera verify demo` reports them as missing and the
+        first thing anyone trying the demo sees is a drift warning about a
+        server that is perfectly fine.
+        """
+        import re
+        for match in re.finditer(r">>?\s*(/[\w./@-]+)", command):
+            path = match.group(1)
+            if path.startswith("/dev/"):
+                continue
+            self.files.setdefault(path, "# created by the simulated server\n")
+        # `mkdir -p` makes directories the inventory later looks for.
+        for chunk in re.findall(r"mkdir -p ([^&|;\n]+)", command):
+            for part in chunk.split():
+                part = part.strip("'\"")
+                if part.startswith("/"):
+                    self.files.setdefault(part.rstrip("/") + "/.dir", "")
+        self._save()
+
+    def _apply_removals(self, command: str) -> None:
+        """Honour rm/shred against the virtual disk.
+
+        Without this the uninstaller would report success while the simulated
+        server still had every file, and 'tessera install demo' afterwards
+        would refuse because it looked like a VPN was already there.
+        """
+        import re
+        if not re.search(r"\b(rm|shred|rmdir)\b", command):
+            return
+        for token in re.findall(r"(/[\w./@-]+)", command):
+            for existing in list(self.files):
+                if existing == token or existing.startswith(token.rstrip("/") + "/"):
+                    self.files.pop(existing, None)
+        self._save()
 
     def write_file(self, path: str, content: str, mode: str = "0600") -> None:
         self.files[path] = content
+        self._save()
+
+    def _load(self) -> None:
+        import json
+        import os
+        p = state_path()
+        if not os.path.exists(p):
+            return
+        try:
+            with open(p, "r", encoding="utf-8") as fh:
+                self.files = json.load(fh).get("files", {})
+        except Exception:                                      # noqa: BLE001
+            self.files = {}
+
+    def _save(self) -> None:
+        if not self._persist:
+            return
+        import json
+        import os
+        p = state_path()
+        try:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            tmp = p + ".tmp"
+            # 0600 even though these keys are simulated: this file has the
+            # same shape as a real one, and a demo that models sloppy
+            # permissions is teaching the wrong habit.
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"files": self.files}, fh, indent=2, sort_keys=True)
+            os.replace(tmp, p)
+        except Exception:                                      # noqa: BLE001
+            pass
 
     def read_file(self, path: str) -> str:
         if path in self.files:
@@ -90,7 +222,10 @@ class DemoTransport(Transport):
         return ""
 
     def file_exists(self, path: str) -> bool:
-        return path in self.files
+        if path in self.files:
+            return True
+        prefix = path.rstrip("/") + "/"
+        return any(f.startswith(prefix) for f in self.files)
 
     def which(self, binary: str) -> Optional[str]:
         return "/usr/bin/" + binary

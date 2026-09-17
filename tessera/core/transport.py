@@ -96,7 +96,14 @@ class Transport:
         We write to a temp file in the same directory and rename, so a crash or
         a dropped connection can never leave a half-written key on disk.
         """
+        # If a line of content ever equalled the delimiter, the heredoc would
+        # end early and the rest of the file would be executed as shell. The
+        # delimiter is random so this cannot be forced, but "cannot be forced"
+        # and "cannot happen" are different guarantees, and this is the writer
+        # every private key goes through.
         delim = "TESSERA_{}".format(uuid.uuid4().hex.upper())
+        while any(line.strip() == delim for line in content.splitlines()):
+            delim = "TESSERA_{}".format(uuid.uuid4().hex.upper())
         q = shlex.quote(path)
         script = (
             "set -eu\n"
@@ -202,7 +209,8 @@ class SSHTransport(Transport):
                  sudo_password: Optional[str] = None,
                  extra_opts: Optional[Sequence[str]] = None,
                  connect_timeout: int = 15,
-                 multiplex: bool = True) -> None:
+                 multiplex: bool = True,
+                 strict_host_keys: bool = False) -> None:
         if shutil.which("ssh") is None:
             raise TransportError(
                 "no ssh client found on this machine",
@@ -214,6 +222,7 @@ class SSHTransport(Transport):
         self.identity = identity
         self.extra_opts = list(extra_opts or [])
         self.connect_timeout = connect_timeout
+        self.strict_host_keys = strict_host_keys
         self._sudo_password = sudo_password
         self._ctl_dir: Optional[str] = None
         self._ctl_path: Optional[str] = None
@@ -229,10 +238,18 @@ class SSHTransport(Transport):
 
     # -- command construction -------------------------------------------------
     def _base_args(self) -> List[str]:
+        # accept-new is trust-on-first-use: an unknown host is recorded, and a
+        # host whose key *changed* is refused - which is the case that means
+        # interception. It is the same trade `git clone` makes, and it is the
+        # default because the alternative is people pasting keys around or
+        # reaching for StrictHostKeyChecking=no, which is strictly worse.
+        # --strict-host-keys refuses unknown hosts too, for anyone who
+        # provisions known_hosts ahead of time.
+        policy = "yes" if self.strict_host_keys else "accept-new"
         args = ["ssh", "-p", str(self.port),
                 "-o", "ConnectTimeout={}".format(self.connect_timeout),
                 "-o", "BatchMode=yes",
-                "-o", "StrictHostKeyChecking=accept-new"]
+                "-o", "StrictHostKeyChecking={}".format(policy)]
         if self._ctl_path:
             args += ["-o", "ControlMaster=auto",
                      "-o", "ControlPath={}".format(self._ctl_path),
@@ -240,6 +257,17 @@ class SSHTransport(Transport):
         if self.identity:
             args += ["-i", self.identity, "-o", "IdentitiesOnly=yes"]
         for opt in self.extra_opts:
+            # Refuse the one option that would silently remove the only
+            # protection against a machine-in-the-middle. If someone needs it,
+            # they can run ssh themselves and own that decision.
+            flat = opt.replace(" ", "").lower()
+            if flat.startswith("stricthostkeychecking=no") or \
+               flat.startswith("userknownhostsfile=/dev/null"):
+                raise TransportError(
+                    "refusing ssh option '{}'".format(opt),
+                    "That disables host key verification, which is the only "
+                    "thing standing between you and an intercepted "
+                    "connection carrying your VPN keys.")
             args += ["-o", opt]
         args.append("{}{}".format((self.user + "@") if self.user else "", self.host))
         return args

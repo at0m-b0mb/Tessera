@@ -68,23 +68,30 @@ class WireGuardEngine(Engine):
     )
 
     # ---------------------------------------------------------------- helpers
+    # Every path built from the interface name goes through require_iface, so
+    # a name that could escape the directory or a shell command is refused at
+    # the point of use rather than trusted because of where it came from.
     @staticmethod
     def conf_path(cfg: WireGuardConfig) -> str:
-        return "/etc/wireguard/{}.conf".format(cfg.interface)
+        return "/etc/wireguard/{}.conf".format(
+            netcalc.require_iface(cfg.interface))
 
     @staticmethod
     def key_path(cfg: WireGuardConfig) -> str:
-        return "/etc/tessera/wg-{}.key".format(cfg.interface)
+        return "/etc/tessera/wg-{}.key".format(
+            netcalc.require_iface(cfg.interface))
 
     @staticmethod
     def fw_path(cfg: WireGuardConfig) -> str:
-        return "/etc/tessera/wg-{}-firewall.sh".format(cfg.interface)
+        return "/etc/tessera/wg-{}-firewall.sh".format(
+            netcalc.require_iface(cfg.interface))
 
     @staticmethod
     def unit(f: Facts, cfg: WireGuardConfig) -> str:
+        iface = netcalc.require_iface(cfg.interface)
         if f.init == "openrc":
-            return "wg-quick.{}".format(cfg.interface)
-        return "wg-quick@{}".format(cfg.interface)
+            return "wg-quick.{}".format(iface)
+        return "wg-quick@{}".format(iface)
 
     # ---------------------------------------------------------------- install
     def plan_install(self, ctx: EngineContext) -> Plan:
@@ -268,6 +275,8 @@ class WireGuardEngine(Engine):
         peer = Peer(name=name, engine=self.name, public_key=public,
                     private_key=private, preshared_key=wg_psk(),
                     address_v4=v4, address_v6=v6,
+                    interface=cfg.interface,
+                    access_expires=options.get("access_expires", ""),
                     note=options.get("note", ""))
 
         plan = Plan("Add WireGuard peer '{}'".format(name))
@@ -393,7 +402,7 @@ class WireGuardEngine(Engine):
     def _render_firewall(self, f: Facts, cfg: WireGuardConfig) -> str:
         """NAT and forwarding rules as one auditable, reversible script."""
         nic = f.nic or "eth0"
-        iface = cfg.interface
+        iface = netcalc.require_iface(cfg.interface)
         v4 = cfg.subnet_v4
         v6 = cfg.subnet_v6
         add4, del4 = masquerade_rules(nic, v4)
@@ -402,18 +411,23 @@ class WireGuardEngine(Engine):
         block_up, block_down = [], []
         if True:  # rendered unconditionally; the caller decides via hardening
             for net in netcalc.PROTECTED_V4:
+                # $IFACE, not the name inlined: the variable is assigned once
+                # through shlex.quote above, so a hostile interface name
+                # cannot break out of it here.
                 block_up.append(
-                    "  iptables -C FORWARD -i {i} -d {n} -j REJECT 2>/dev/null "
-                    "|| iptables -I FORWARD -i {i} -d {n} -j REJECT".format(
-                        i=iface, n=net))
+                    '  iptables -C FORWARD -i "$IFACE" -d {n} -j REJECT '
+                    '2>/dev/null '
+                    '|| iptables -I FORWARD -i "$IFACE" -d {n} -j REJECT'
+                    .format(n=net))
                 block_down.append(
-                    "  iptables -D FORWARD -i {i} -d {n} -j REJECT "
-                    "2>/dev/null || true".format(i=iface, n=net))
+                    '  iptables -D FORWARD -i "$IFACE" -d {n} -j REJECT '
+                    '2>/dev/null || true'.format(n=net))
 
-        guard = ("# Written by Tessera. Called from {}'s PostUp/PostDown.\n"
+        guard = ("# Written by Tessera. Called from the interface's "
+                 "PostUp/PostDown.\n"
                  "# 'up' adds the rules, 'down' removes exactly those rules.\n"
                  "# Every add is guarded with -C so running it twice is a no-op\n"
-                 "# instead of stacking a duplicate rule.\n").format(iface)
+                 "# instead of stacking a duplicate rule.\n")
 
         parts = [
             "#!/bin/sh", "set -u", guard, "",
@@ -422,10 +436,10 @@ class WireGuardEngine(Engine):
             "up() {",
             "  iptables -C INPUT -p udp --dport {p} -j ACCEPT 2>/dev/null || "
             "iptables -I INPUT -p udp --dport {p} -j ACCEPT".format(p=cfg.port),
-            "  iptables -C FORWARD -i $IFACE -j ACCEPT 2>/dev/null || "
-            "iptables -I FORWARD -i $IFACE -j ACCEPT",
-            "  iptables -C FORWARD -o $IFACE -j ACCEPT 2>/dev/null || "
-            "iptables -I FORWARD -o $IFACE -j ACCEPT",
+            '  iptables -C FORWARD -i "$IFACE" -j ACCEPT 2>/dev/null || '
+            'iptables -I FORWARD -i "$IFACE" -j ACCEPT',
+            '  iptables -C FORWARD -o "$IFACE" -j ACCEPT 2>/dev/null || '
+            'iptables -I FORWARD -o "$IFACE" -j ACCEPT',
         ]
         parts += ["__BLOCK_UP__"]
         parts += ["  " + add4]
@@ -437,8 +451,8 @@ class WireGuardEngine(Engine):
             "down() {",
             "  iptables -D INPUT -p udp --dport {p} -j ACCEPT 2>/dev/null "
             "|| true".format(p=cfg.port),
-            "  iptables -D FORWARD -i $IFACE -j ACCEPT 2>/dev/null || true",
-            "  iptables -D FORWARD -o $IFACE -j ACCEPT 2>/dev/null || true",
+            '  iptables -D FORWARD -i "$IFACE" -j ACCEPT 2>/dev/null || true',
+            '  iptables -D FORWARD -o "$IFACE" -j ACCEPT 2>/dev/null || true',
             "__BLOCK_DOWN__",
             "  " + del4,
         ]

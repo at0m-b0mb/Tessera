@@ -96,6 +96,11 @@ class Peer:
     fingerprint: str = ""
     expires: str = ""
     # Common
+    #: Which interface this peer lives on, so the expiry script knows where
+    #: to look without having to parse the inventory.
+    interface: str = ""
+    #: ISO date after which access is revoked automatically. Empty = permanent.
+    access_expires: str = ""
     revoked: bool = False
     note: str = ""
     last_handshake: str = ""

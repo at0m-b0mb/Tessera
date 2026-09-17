@@ -157,17 +157,20 @@ class PeerWorker(_Base):
     added = pyqtSignal(object, str)        # Peer, client config
     removed = pyqtSignal(str)
     def __init__(self, session: Session, action: str, engine: str, name: str,
+                 expires: str = "",
                  parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._s = session
         self._action = action
         self._engine = engine
         self._name = name
+        self._expires = expires
 
     def run(self) -> None:
         try:
             if self._action == "add":
-                peer, conf = self._s.add_peer(self._engine, self._name)
+                peer, conf = self._s.add_peer(self._engine, self._name,
+                                              expires=self._expires)
                 self.added.emit(peer, conf)
             else:
                 self._s.remove_peer(self._engine, self._name)

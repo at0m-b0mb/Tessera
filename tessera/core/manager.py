@@ -20,11 +20,15 @@ from dataclasses import asdict
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .. import __version__
+from . import adopt as adopt_mod
 from . import audit as audit_mod
+from . import expiry as expiry_mod
 from . import facts as facts_mod
 from . import hardening as hardening_mod
 from . import state as state_mod
 from . import uninstall as uninstall_mod
+from . import verify as verify_mod
+from . import backup as backup_mod
 from .engines import get as get_engine
 from .engines.base import EngineContext
 from .errors import PreflightError, TesseraError
@@ -52,20 +56,26 @@ class Session:
     # ------------------------------------------------------------- lifecycle
     @classmethod
     def connect(cls, target: Target, *, sudo_password: Optional[str] = None,
-                resolve_public_ip: bool = True) -> "Session":
+                resolve_public_ip: bool = True,
+                strict_host_keys: bool = False) -> "Session":
         """Open the connection and inspect the target.  Changes nothing."""
         if target.host == "demo":
             from .demo import DemoTransport, facts as demo_facts
             transport = DemoTransport()
-            return cls(transport, demo_facts(),
-                       ServerState(tessera_version=__version__), target,
+            # Load the inventory like any other target. Hardcoding an empty
+            # one here made every demo command after the first behave as if
+            # nothing had been installed.
+            demo_state = (state_mod.load(transport)
+                          or ServerState(tessera_version=__version__))
+            return cls(transport, demo_facts(), demo_state, target,
                        can_root=True)
         if target.is_local:
             transport = LocalTransport(sudo_password=sudo_password)
         else:
             transport = SSHTransport(
                 host=target.host, user=target.user or None, port=target.port,
-                identity=target.identity or None, sudo_password=sudo_password)
+                identity=target.identity or None, sudo_password=sudo_password,
+                strict_host_keys=strict_host_keys)
             transport.probe()
 
         f = facts_mod.gather(transport, resolve_public_ip=resolve_public_ip)
@@ -224,9 +234,16 @@ class Session:
     # ------------------------------------------------------------------ peers
     def add_peer(self, engine: str, name: str, *,
                  spec: Optional[InstallSpec] = None,
-                 **options) -> Tuple[Peer, str]:
-        """Create a peer.  Returns (peer, client config text)."""
+                 expires: str = "", **options) -> Tuple[Peer, str]:
+        """Create a peer.  Returns (peer, client config text).
+
+        ``expires`` accepts ``14d``, ``2w`` or an exact date.  When set, the
+        server is given a self-contained daily job that revokes the peer on
+        time whether or not Tessera is ever run against it again.
+        """
         self.require_root()
+        if expires:
+            options["access_expires"] = expiry_mod.parse_duration(expires)
         spec = spec or self.spec_from_state()
         ctx = EngineContext(transport=self.transport, facts=self.facts,
                             spec=spec, state=self.state)
@@ -249,6 +266,8 @@ class Session:
         rec.peers.append(stored)
         self.state.set_engine(rec)
         state_mod.save(self.transport, self.state)
+        if peer.access_expires:
+            self._sync_expiry(install=True)
         return peer, client_conf
 
     def remove_peer(self, engine: str, name: str, *,
@@ -271,6 +290,7 @@ class Session:
             rec.peers = [p for p in rec.peers if p.get("name") != name]
         self.state.set_engine(rec)
         state_mod.save(self.transport, self.state)
+        self._sync_expiry()
         return report
 
     def list_peers(self, engine: str = "") -> List[Peer]:
@@ -319,6 +339,145 @@ class Session:
         if self.state.installed_engines:
             state_mod.save(self.transport, self.state)
         return report
+
+    # --------------------------------------------------------------- expiry
+    def _sync_expiry(self, *, install: bool = False) -> None:
+        """Keep the server's expiry table in step with the inventory.
+
+        Never fatal: a peer that was successfully created must not be reported
+        as a failure because the bookkeeping afterwards did not land.
+        """
+        try:
+            expiring = [p for p in self.list_peers()
+                        if p.access_expires and not p.revoked]
+            if install and expiring:
+                plan = expiry_mod.plan_install(expiring, self.facts.init)
+            elif self.transport.file_exists(expiry_mod.TABLE):
+                plan = expiry_mod.plan_refresh(expiring)
+            else:
+                return
+            Executor(self.transport, rollback_on_failure=False).run(plan)
+        except Exception:                                      # noqa: BLE001
+            pass
+
+    def reconcile_expiries(self) -> List[Dict[str, str]]:
+        """Fold anything the server revoked on its own into the inventory.
+
+        The revocation script cuts off access and appends to a log rather than
+        editing state.json, because JSON surgery in shell is a good way to
+        break the thing that actually matters. This is the other half.
+        """
+        if not self.transport.file_exists(expiry_mod.LOG):
+            return []
+        try:
+            entries = expiry_mod.parse_log(
+                self.transport.read_file(expiry_mod.LOG))
+        except Exception:                                      # noqa: BLE001
+            return []
+        applied: List[Dict[str, str]] = []
+        for entry in entries:
+            rec = self.state.engine(entry["engine"])
+            if rec is None:
+                continue
+            changed = False
+            for stored in rec.peers:
+                if stored.get("name") == entry["name"] and not stored.get("revoked"):
+                    stored["revoked"] = True
+                    stored["note"] = "access expired {}".format(entry["expired"])
+                    changed = True
+            if changed:
+                self.state.set_engine(rec)
+                applied.append(entry)
+        if applied:
+            state_mod.save(self.transport, self.state)
+            self.transport.run_root("rm -f {}".format(expiry_mod.LOG))
+        return applied
+
+    def expiring_soon(self, within_days: int = 7) -> List[Peer]:
+        out = []
+        for p in self.list_peers():
+            if p.revoked or not p.access_expires:
+                continue
+            left = expiry_mod.days_left(p.access_expires)
+            if left is not None and left <= within_days:
+                out.append(p)
+        return sorted(out, key=lambda x: x.access_expires)
+
+    # ---------------------------------------------------------------- adopt
+    def discover(self) -> Dict[str, Dict]:
+        """Find VPNs already on this server.  Read-only."""
+        return adopt_mod.discover(self.transport, self.facts)
+
+    def adopt(self, found: Optional[Dict[str, Dict]] = None, *,
+              engines: Optional[List[str]] = None) -> Tuple[List[str], List[str]]:
+        """Write an inventory for an install Tessera did not create.
+
+        Returns (adopted engine names, warnings).  Anything already managed by
+        Tessera is left alone: adopting twice is not a way to lose your
+        existing inventory.
+        """
+        self.require_root()
+        found = found if found is not None else self.discover()
+        if engines:
+            found = {k: v for k, v in found.items() if k in engines}
+        already = set(self.state.installed_engines)
+        found = {k: v for k, v in found.items() if k not in already}
+        if not found:
+            raise adopt_mod.NothingToAdopt(
+                "nothing to adopt on {}".format(self.target.display()),
+                "Either there is no VPN here, or Tessera already manages "
+                "everything it found.")
+        state, warnings = adopt_mod.build_state(
+            found, self.facts, __version__, existing=self.state)
+        self.state = state
+        state_mod.save(self.transport, self.state)
+        return sorted(found), warnings
+
+    # ---------------------------------------------------------------- verify
+    def verify(self) -> List[Finding]:
+        """Compare the server against the inventory.  Read-only."""
+        return verify_mod.run(self.transport, self.facts, self.state)
+
+    def fixable(self) -> Dict[str, List[str]]:
+        return verify_mod.fixable(self.transport, self.state)
+
+    def apply_fix(self) -> List[str]:
+        self.require_root()
+        changed = verify_mod.apply_fix(self.transport, self.state)
+        if changed:
+            state_mod.save(self.transport, self.state)
+        return changed
+
+    # ---------------------------------------------------------------- backup
+    def backup(self, passphrase: str) -> Tuple[bytes, "backup_mod.Manifest"]:
+        """Pull an encrypted archive of everything that matters."""
+        self.require_root()
+        if not self.state.installed_engines:
+            raise backup_mod.BackupError(
+                "nothing to back up on {}".format(self.target.display()),
+                "This server has no Tessera-managed install.")
+        payload, manifest = backup_mod.capture(
+            self.transport, self.state,
+            server_label=self.target.display(),
+            os_summary=self.facts.summary(), tessera_version=__version__)
+        return backup_mod.seal(payload, passphrase, manifest), manifest
+
+    def restore(self, blob: bytes, passphrase: str, *,
+                dry_run: bool = False,
+                new_endpoint: str = "") -> Tuple["backup_mod.Manifest", List[str]]:
+        """Push a backup onto this server.  Returns (manifest, endpoint changes)."""
+        self.require_root()
+        payload, manifest = backup_mod.unseal(blob, passphrase)
+        backup_mod.push(self.transport, payload, dry_run=dry_run)
+        if dry_run:
+            return manifest, []
+        self.refresh()
+        changes: List[str] = []
+        if new_endpoint:
+            changes = backup_mod.rewrite_endpoint(self.state, new_endpoint)
+            if changes:
+                state_mod.save(self.transport, self.state)
+        return manifest, changes
 
     # ----------------------------------------------------------------- audit
     def audit(self) -> List[Finding]:

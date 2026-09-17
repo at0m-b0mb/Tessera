@@ -29,6 +29,8 @@ from ..core import interview as iv
 from ..core import qr as qr_mod
 from ..core.audit import tally, verdict
 from ..core.manager import Session, quick_target
+from ..core import expiry as expiry_mod
+from ..core import fleet
 from ..core.models import InstallSpec, Peer
 from ..core.plan import Plan
 from ..core.state import summary_line
@@ -125,9 +127,19 @@ class ConnectPage(Page):
         grid.setColumnStretch(1, 1)
         grid.setVerticalSpacing(9)
 
+        # Saved servers first: the common case is reconnecting to one you
+        # already manage, not typing a hostname again.
+        self.saved = QComboBox()
+        self.saved.currentIndexChanged.connect(self._pick_saved)
+
         self.host = QLineEdit()
         self.host.setPlaceholderText("user@vpn.example.com   (or: local, demo)")
         self.host.returnPressed.connect(self.connect_now)
+        self.remember = QCheckBox("Remember this server as")
+        self.nickname = QLineEdit()
+        self.nickname.setPlaceholderText("prod")
+        self.nickname.setEnabled(False)
+        self.remember.toggled.connect(self.nickname.setEnabled)
         self.port = QSpinBox()
         self.port.setRange(1, 65535)
         self.port.setValue(22)
@@ -137,14 +149,19 @@ class ConnectPage(Page):
         browse = QPushButton("Browse")
         browse.clicked.connect(self._pick_key)
 
-        grid.addWidget(QLabel("Server"), 0, 0)
-        grid.addWidget(self.host, 0, 1, 1, 2)
-        grid.addWidget(QLabel("SSH port"), 1, 0)
-        grid.addWidget(self.port, 1, 1)
-        grid.addWidget(QLabel("Key file"), 2, 0)
-        grid.addWidget(self.identity, 2, 1)
-        grid.addWidget(browse, 2, 2)
+        grid.addWidget(QLabel("Saved"), 0, 0)
+        grid.addWidget(self.saved, 0, 1, 1, 2)
+        grid.addWidget(QLabel("Server"), 1, 0)
+        grid.addWidget(self.host, 1, 1, 1, 2)
+        grid.addWidget(QLabel("SSH port"), 2, 0)
+        grid.addWidget(self.port, 2, 1)
+        grid.addWidget(QLabel("Key file"), 3, 0)
+        grid.addWidget(self.identity, 3, 1)
+        grid.addWidget(browse, 3, 2)
+        grid.addWidget(self.remember, 4, 0, 1, 1)
+        grid.addWidget(self.nickname, 4, 1)
         card.add_layout(grid)
+        self._reload_saved()
 
         card.add(muted(
             "Connections use your system's own ssh client, so ~/.ssh/config "
@@ -193,6 +210,30 @@ class ConnectPage(Page):
         self.add(info)
         self.stretch()
 
+    def _reload_saved(self) -> None:
+        self.saved.blockSignals(True)
+        self.saved.clear()
+        self.saved.addItem("- type a server below -", "")
+        try:
+            for server in fleet.load().all():
+                label = "{}   ({})".format(server.name, server.display())
+                self.saved.addItem(label, server.name)
+        except Exception:                                      # noqa: BLE001
+            pass
+        self.saved.blockSignals(False)
+
+    def _pick_saved(self, index: int) -> None:
+        name = self.saved.itemData(index) or ""
+        if not name:
+            return
+        server = fleet.load().get(name)
+        if server is None:
+            return
+        self.host.setText(server.display())
+        self.port.setValue(server.port)
+        self.identity.setText(server.identity)
+        self.remember.setChecked(False)
+
     def _pick_key(self) -> None:
         start = os.path.expanduser("~/.ssh")
         path, _ = QFileDialog.getOpenFileName(self, "Select an SSH private key",
@@ -221,6 +262,14 @@ class ConnectPage(Page):
 
     def _ok(self, session: Session) -> None:
         self.go.setEnabled(True)
+        if self.remember.isChecked():
+            nickname = self.nickname.text().strip()
+            try:
+                fleet.add(nickname, self.host.text().strip(),
+                          identity=self.identity.text().strip(), overwrite=True)
+                self._reload_saved()
+            except Exception as exc:                           # noqa: BLE001
+                QMessageBox.warning(self, "Could not save", str(exc))
         self.status.setText("Connected: {}".format(session.facts.summary()))
         self.status.setStyleSheet("color:%s;" % theme.OK)
         self.connected.emit(session)
@@ -602,6 +651,26 @@ class DashboardPage(Page):
         refresh.clicked.connect(self.refresh)
         row = QHBoxLayout()
         row.addWidget(refresh)
+
+        # Maintenance lives next to the status it applies to, rather than in a
+        # menu. Adopt in particular has to be findable: without it, anyone who
+        # already runs a VPN has no way into the tool at all.
+        self.adopt_btn = QPushButton("Adopt existing VPN")
+        self.adopt_btn.setToolTip(
+            "Manage a WireGuard or OpenVPN install that another tool set up. "
+            "Nothing on the server is changed.")
+        self.adopt_btn.clicked.connect(self._adopt)
+        self.verify_btn = QPushButton("Verify")
+        self.verify_btn.setToolTip(
+            "Check the server still matches Tessera's inventory.")
+        self.verify_btn.clicked.connect(self._verify)
+        self.backup_btn = QPushButton("Back up")
+        self.backup_btn.setToolTip(
+            "Encrypted archive of keys and configuration.")
+        self.backup_btn.clicked.connect(self._backup)
+        row.addWidget(self.adopt_btn)
+        row.addWidget(self.verify_btn)
+        row.addWidget(self.backup_btn)
         row.addStretch(1)
         self.col.addLayout(row)
         self.stretch()
@@ -673,6 +742,102 @@ class DashboardPage(Page):
         self.tile_traffic.set_value(human_bytes(traffic))
 
 
+    # -- maintenance ---------------------------------------------------------
+    def _adopt(self) -> None:
+        if not self.session:
+            return
+        try:
+            found = self.session.discover()
+        except Exception as exc:                               # noqa: BLE001
+            QMessageBox.critical(self, "Could not inspect", str(exc))
+            return
+        if not found:
+            QMessageBox.information(
+                self, "Nothing found",
+                "No WireGuard, OpenVPN or Tailscale install was found on "
+                "this server.")
+            return
+        from ..core.adopt import summarise
+        already = set(self.session.state.installed_engines)
+        new = [k for k in found if k not in already]
+        if not new:
+            QMessageBox.information(
+                self, "Already managed",
+                "Tessera already manages everything it found here.")
+            return
+        detail = "\n".join("- " + line for line in summarise(found))
+        answer = QMessageBox.question(
+            self, "Adopt this install?",
+            "Found:\n{}\n\nAdopting writes an inventory describing what is "
+            "already here. Nothing on the server is changed, restarted or "
+            "reconfigured.\n\nPackages and system settings are recorded as "
+            "pre-existing, so removing the VPN later will never uninstall "
+            "them.".format(detail))
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            engines, warnings = self.session.adopt(found)
+        except Exception as exc:                               # noqa: BLE001
+            QMessageBox.critical(self, "Could not adopt", str(exc))
+            return
+        message = "Now managing {}.".format(" and ".join(engines))
+        if warnings:
+            message += "\n\n" + "\n\n".join(warnings)
+        QMessageBox.information(self, "Adopted", message)
+        self.refresh()
+
+    def _verify(self) -> None:
+        if not self.session:
+            return
+        try:
+            findings = self.session.verify()
+        except Exception as exc:                               # noqa: BLE001
+            QMessageBox.critical(self, "Could not verify", str(exc))
+            return
+        problems = [f for f in findings if f.is_problem]
+        if not problems:
+            QMessageBox.information(
+                self, "No drift",
+                "The server matches Tessera's inventory.")
+            return
+        body = "\n\n".join(
+            "{}\n{}".format(f.title, f.remedy or f.detail) for f in problems)
+        QMessageBox.warning(self, "Drift detected", body)
+
+    def _backup(self) -> None:
+        if not self.session:
+            return
+        from PyQt6.QtWidgets import QInputDialog
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save encrypted backup",
+            os.path.expanduser("~/tessera-backup.backup"))
+        if not path:
+            return
+        # No option to skip encryption: the archive holds the CA private key.
+        passphrase, ok = QInputDialog.getText(
+            self, "Passphrase",
+            "This archive contains private keys, so it is always encrypted.\n"
+            "Choose a passphrase (at least 8 characters):",
+            QLineEdit.EchoMode.Password)
+        if not ok or len(passphrase) < 8:
+            if ok:
+                QMessageBox.warning(self, "Too short",
+                                    "Use at least 8 characters.")
+            return
+        try:
+            from ..core import backup as backup_mod
+            blob, manifest = self.session.backup(passphrase)
+            backup_mod.write(path, blob)
+        except Exception as exc:                               # noqa: BLE001
+            QMessageBox.critical(self, "Backup failed", str(exc))
+            return
+        QMessageBox.information(
+            self, "Backed up",
+            "Saved {}\n\n{}\n\nKeep this where you would keep a password "
+            "database: anyone with the file and the passphrase can "
+            "impersonate your server.".format(path, manifest.summary()))
+
+
 # --------------------------------------------------------------------------- #
 # Devices
 # --------------------------------------------------------------------------- #
@@ -689,11 +854,21 @@ class PeersPage(Page):
         self.name = QLineEdit()
         self.name.setPlaceholderText("device name, e.g. work-laptop")
         self.name.returnPressed.connect(self._add)
+        # Time-limited access is the common case for anyone who is not you,
+        # and the one people forget to undo, so it is on the main row rather
+        # than hidden behind an "advanced" disclosure.
+        self.expires = QComboBox()
+        self.expires.addItem("No expiry", "")
+        for label, value in [("7 days", "7d"), ("14 days", "14d"),
+                             ("30 days", "30d"), ("90 days", "90d"),
+                             ("6 months", "6m"), ("1 year", "1y")]:
+            self.expires.addItem("Expires in " + label, value)
         add = QPushButton("Add device")
         add.setObjectName("Primary")
         add.clicked.connect(self._add)
         row.addWidget(self.engine_pick)
         row.addWidget(self.name, 1)
+        row.addWidget(self.expires)
         row.addWidget(add)
         self.col.addLayout(row)
 
@@ -727,6 +902,7 @@ class PeersPage(Page):
     def reload(self) -> None:
         if not self.session:
             return
+        self.expires.setCurrentIndex(0)
         peers = self.session.list_peers()
         self.table.setRowCount(0)
         for peer in peers:
@@ -751,8 +927,22 @@ class PeersPage(Page):
             self.table.setItem(r, 2, QTableWidgetItem(identity))
             self.table.setItem(r, 3, QTableWidgetItem(peer.created[:10]))
 
-            state = QTableWidgetItem("revoked" if peer.revoked else "active")
-            state.setForeground(QColor(theme.MUTED if peer.revoked else theme.OK))
+            # Expiry is the state that matters most: an "active" device that
+            # stops working on Friday should say so on the row, not in a
+            # dialog somebody has to go looking for.
+            if peer.revoked:
+                label, colour = "revoked", theme.MUTED
+            elif peer.access_expires:
+                left = expiry_mod.days_left(peer.access_expires)
+                label = expiry_mod.describe(peer.access_expires)
+                colour = theme.WARN if (left is not None and left <= 7) else theme.OK
+            else:
+                label, colour = "active", theme.OK
+            state = QTableWidgetItem(label)
+            state.setForeground(QColor(colour))
+            if peer.access_expires:
+                state.setToolTip("Access ends {} and is revoked by the server "
+                                 "automatically.".format(peer.access_expires))
             self.table.setItem(r, 4, state)
 
             # Set the row height explicitly.  A cell widget is given the cell
@@ -777,7 +967,8 @@ class PeersPage(Page):
             QMessageBox.warning(self, "Name required",
                                 "Give the device a name first.")
             return
-        self._worker = PeerWorker(self.session, "add", engine, name)
+        self._worker = PeerWorker(self.session, "add", engine, name,
+                                  expires=self.expires.currentData() or "")
         self._worker.added.connect(self._added)
         self._worker.failed.connect(
             lambda m, r: QMessageBox.critical(

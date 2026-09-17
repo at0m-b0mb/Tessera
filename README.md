@@ -11,7 +11,7 @@
 [![Runs on](https://img.shields.io/badge/Runs%20on-macOS%20%7C%20Windows%20%7C%20Linux-C88A4A?labelColor=12151A)](#quick-start)
 [![No agent](https://img.shields.io/badge/Server%20side-no%20agent%20installed-5BC98C?labelColor=12151A)](#how-it-works)
 
-[Quick start](#quick-start) · [How it works](#how-it-works) · [Why it is built this way](#four-decisions-that-shape-everything) · [CLI](#the-cli) · [Uninstalling](#uninstalling)
+[Adopt an existing VPN](#already-running-a-vpn) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Why it is built this way](#four-decisions-that-shape-everything) · [CLI](#the-cli) · [Uninstalling](#uninstalling)
 
 </div>
 
@@ -77,6 +77,25 @@ is built on: your device holds one half, the server holds the other, and the
 tunnel exists because the halves fit.
 
 ---
+
+## Already running a VPN?
+
+Tessera can take over an install that something else created, including both of
+the scripts this project takes reference from:
+
+```bash
+tessera adopt root@vpn.example.com
+```
+
+It reads the existing configuration, imports every peer, and writes the
+inventory that was never there. **Nothing on the server is changed** — no
+restart, no reconfiguration, no reissued keys. Afterwards `status`, `peer add`,
+`audit` and the rest work as though Tessera had built it.
+
+Packages and system settings are recorded as pre-existing, so a later
+`uninstall` will not remove them. The VPN's own files are marked adopted, and
+the uninstaller tells you which files it is about to delete that it did not
+create.
 
 ## Quick start
 
@@ -319,17 +338,41 @@ fallback still works.
 ## The CLI
 
 ```
-tessera install    [target]   install and configure a VPN
-tessera status     [target]   what is running and who is connected
-tessera peer       add|list|remove
-tessera audit      [target]   check the server's security posture
-tessera uninstall  [target]   remove cleanly, shredding key material
-tessera doctor     [target]   inspect a server without changing it
-tessera gui                   launch the desktop application
+tessera install     [target]   install and configure a VPN
+tessera status      [target]   what is running and who is connected
+tessera watch       [target]   live view of who is connected
+tessera peer        add|list|remove     (--expires 14d)
+tessera audit       [target]   check the server's security posture
+tessera verify      [target]   has anything drifted from the inventory?
+tessera adopt       [target]   manage a VPN another installer set up
+tessera backup      [target]   encrypted archive of keys and config
+tessera restore     <file> [target]     rebuild a server from a backup
+tessera uninstall   [target]   remove cleanly, shredding key material
+tessera doctor      [target]   inspect a server without changing it
+tessera servers     add|list|remove     saved machines, by nickname
+tessera completions bash|zsh|fish
+tessera demo        info|reset  the simulated server
+tessera gui                    launch the desktop application
 ```
 
-`[target]` is `user@host[:port]`, or omitted for this machine, or `demo` for the
-simulator.
+`[target]` is a saved nickname, or `user@host[:port]`, or omitted for this
+machine, or `demo` for the simulator.
+
+```bash
+# Save the machines you manage, then use the name anywhere
+tessera servers add prod root@vpn.example.com
+tessera status prod
+
+# Access that ends by itself, enforced by the server
+tessera peer add contractor --expires 14d
+
+# Keep it, and move it
+tessera backup prod -o prod.backup
+tessera restore prod.backup root@new-host --endpoint new.example.com
+
+# Has anyone hand-edited the server?
+tessera verify prod
+```
 
 ```bash
 # See exactly what would happen, change nothing
@@ -403,6 +446,7 @@ python3 -m tessera --help
 
 | Document | What is in it |
 |---|---|
+| [docs/FEATURES.md](docs/FEATURES.md) | Every feature, and why it behaves the way it does |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Every module, what it does, and why it is separate |
 | [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md) | Threat model, what Tessera does and does not protect against |
 | [docs/CLI.md](docs/CLI.md) | Full command reference |
@@ -449,6 +493,10 @@ Tessera is a different shape, and the trade is real:
 | **On failure** | whatever the first N lines did | rolls back completed steps |
 | **Uninstall** | a fixed list the author wrote | inventory of what *this* install created |
 | **Pre-existing packages** | removed if on the list | never touched |
+| **Existing installs** | n/a | `adopt` takes over theirs |
+| **Time-limited access** | — | `--expires 14d`, enforced server-side |
+| **Backup / migrate** | — | encrypted archive, keys intact |
+| **Many servers** | one script per box | a saved server book |
 | **Interface** | a numbered bash menu | desktop app + CLI, same engine |
 | **Auditing** | — | read-only posture check, exit code for CI |
 | **Dependency** | bash | Python 3.9 + `cryptography` |

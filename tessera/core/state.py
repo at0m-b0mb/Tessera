@@ -46,6 +46,11 @@ class Artifact:
     ref: str           # path, package name, unit name, rule id, sysctl key
     #: True when this already existed before Tessera ran.  Never removed.
     pre_existing: bool = False
+    #: True when Tessera learned about this by inspecting an existing install
+    #: rather than creating it.  Removal still applies (an adopted wg0.conf is
+    #: unambiguously part of the VPN), but the UI says so plainly, because
+    #: "delete a thing you did not create" deserves a second look.
+    adopted: bool = False
     #: Original content, for things we modified rather than created.
     backup: str = ""
     engine: str = ""
@@ -137,6 +142,11 @@ class ServerState:
         for name in self.engines:
             out.extend(self.artifacts_for(name))
         return out
+
+    @property
+    def adopted(self) -> bool:
+        """True when any part of this server was taken over rather than built."""
+        return any(a.adopted for a in self.all_artifacts())
 
     def removable(self, engine: str = "") -> List[Artifact]:
         """Artifacts Tessera may delete: everything it created itself.

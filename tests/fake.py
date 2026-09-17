@@ -26,6 +26,7 @@ class FakeTransport(Transport):
         self.fail = fail or []
         self.commands: List[str] = []
         self.writes: List[tuple] = []
+        self.dirs: set = set()
 
     def run(self, command, *, check=False, timeout=300, sink=None,
             input_text=None) -> CommandResult:
@@ -36,6 +37,22 @@ class FakeTransport(Transport):
         for pattern in self.fail:
             if re.search(pattern, command):
                 return CommandResult(command, 1, "", "simulated failure", 0.0)
+
+        # Serve `cat <path>` and `mkdir -p` from the in-memory filesystem, so
+        # code that writes a file and later reads it back sees what it wrote.
+        # Without this, drift detection reports every file as missing and the
+        # test cannot tell a real regression from a gap in the harness.
+        m = re.match(r"^cat (?:--\s+)?(\S+)\s*$", command.strip())
+        if m:
+            path = m.group(1).strip("'\"")
+            if path in self.files:
+                return CommandResult(command, 0, self.files[path], "", 0.0)
+            return CommandResult(command, 1, "", "No such file", 0.0)
+        for path in re.findall(r"mkdir -p ((?:[^&|;\n]+))", command):
+            for part in path.split():
+                part = part.strip("'\"")
+                if part.startswith("/"):
+                    self.dirs.add(part.rstrip("/"))
         return CommandResult(command, 0, "", "", 0.0)
 
     def run_root(self, command, **kw) -> CommandResult:
@@ -44,6 +61,9 @@ class FakeTransport(Transport):
     def write_file(self, path: str, content: str, mode: str = "0600") -> None:
         self.writes.append((path, content, mode))
         self.files[path] = content
+        parent = path.rsplit("/", 1)[0]
+        if parent.startswith("/"):
+            self.dirs.add(parent)
 
     def read_file(self, path: str) -> str:
         if path in self.files:
@@ -51,7 +71,11 @@ class FakeTransport(Transport):
         raise KeyError("no fake file at {}".format(path))
 
     def file_exists(self, path: str) -> bool:
-        return path in self.files
+        if path in self.files or path in self.dirs:
+            return True
+        # Directory semantics: a path is present if anything lives under it.
+        prefix = path.rstrip("/") + "/"
+        return any(f.startswith(prefix) for f in self.files)
 
     def which(self, binary: str) -> Optional[str]:
         return "/usr/bin/" + binary
