@@ -53,6 +53,11 @@ so they cannot drift from the tool. Saved server names complete dynamically.
 … demo` now works across commands, so the whole workflow can be walked before
 you own a server. `tessera demo reset` starts over.
 
+**`-s/--server`** on every command that takes a target. The positional still
+works, but argparse before Python 3.12 cannot reliably parse a positional that
+comes after options — `peer add guest --expires 14d prod` fails there — and the
+flag reads better anyway.
+
 **GUI**: saved-server picker, expiry on the add-device row, and Adopt, Verify
 and Back up on the dashboard.
 

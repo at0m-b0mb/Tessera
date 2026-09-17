@@ -356,7 +356,9 @@ tessera gui                    launch the desktop application
 ```
 
 `[target]` is a saved nickname, or `user@host[:port]`, or omitted for this
-machine, or `demo` for the simulator.
+machine, or `demo` for the simulator. Every command also accepts `-s/--server`,
+which is clearer when other options are in play:
+`tessera peer add guest -s prod --expires 14d`.
 
 ```bash
 # Save the machines you manage, then use the name anywhere

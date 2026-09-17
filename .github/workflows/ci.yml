@@ -52,7 +52,7 @@ jobs:
           python -m tessera install demo --yes --engine wireguard --dry-run
           python -m tessera install demo --yes -e wireguard -e openvpn --no-qr -o ./out
           python -m tessera status demo
-          python -m tessera peer add guest --expires 14d -e wireguard --no-qr -o ./out demo
+          python -m tessera peer add guest -s demo --expires 14d -e wireguard --no-qr -o ./out
           python -m tessera peer list demo
           python -m tessera verify demo
           python -m tessera watch demo --once

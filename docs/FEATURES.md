@@ -59,8 +59,8 @@ replacement peer and revoke the old one.
 ## Expiring access
 
 ```bash
-tessera peer add contractor --expires 14d
-tessera peer add auditor    --expires 2026-12-31
+tessera peer add contractor -s prod --expires 14d
+tessera peer add auditor    -s prod --expires 2026-12-31
 ```
 
 Accepts `7d`, `2w`, `6m`, `1y` or an exact date. A month is 30 days and a year

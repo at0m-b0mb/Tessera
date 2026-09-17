@@ -35,7 +35,7 @@ EXIT_OK, EXIT_ERROR, EXIT_BLOCKED, EXIT_AUDIT_FAILED = 0, 1, 2, 3
 # Shared plumbing
 # --------------------------------------------------------------------------- #
 def connect(ui: UI, args) -> Session:
-    raw = getattr(args, "target", "") or ""
+    raw = (getattr(args, "server", "") or getattr(args, "target", "") or "")
     # A saved nickname wins over a hostname. The two namespaces cannot overlap
     # because a nickname may not contain @ : or / - see fleet.validate_name.
     target = fleet.resolve(raw)
@@ -636,8 +636,9 @@ def cmd_verify(ui: UI, args) -> int:
         ui.out()
         plan = session.fixable()
         if any(plan.values()):
-            ui.info("Some of this can be reconciled: 'tessera verify {} --fix'"
-                    .format(args.target or ""))
+            ui.info("Some of this can be reconciled: "
+                    "'tessera verify {} --fix'".format(
+                        args.server or args.target or ""))
         return EXIT_AUDIT_FAILED
 
     plan = session.fixable()
@@ -881,7 +882,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     def add_target(sp, default_local=True):
         sp.add_argument("target", nargs="?", default="",
-                        help="user@host[:port], or omit for this machine")
+                        help="saved name, user@host[:port], or omit for this "
+                             "machine")
+        # An explicit flag as well as the positional. Commands like
+        # `peer add guest --expires 14d prod` put a positional after options,
+        # and argparse before Python 3.12 cannot reliably parse that - it
+        # reports "unrecognized arguments: prod". `-s prod` always works, and
+        # reads better anyway.
+        sp.add_argument("-s", "--server", dest="server", default="",
+                        help="the server to act on (same as the positional)")
         sp.add_argument("--user", default="", help="SSH user")
         sp.add_argument("--port", type=int, default=0, help="SSH port")
         sp.add_argument("-i", "--identity", default="", help="SSH key file")
