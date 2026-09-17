@@ -312,7 +312,7 @@ if __name__ == "__main__":
         print(fn.__name__)
         try:
             fn()
-        except Exception as exc:                               # noqa: BLE001
+        except Exception:                                      # noqa: BLE001
             failed += 1
             import traceback
             traceback.print_exc()

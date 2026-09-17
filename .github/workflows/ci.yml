@@ -54,6 +54,7 @@ jobs:
           python -m tessera status demo
           python -m tessera peer add guest -s demo --expires 14d -e wireguard --no-qr -o ./out
           python -m tessera peer list demo
+          python -m tessera adopt -s demo -y || true
           python -m tessera verify demo
           python -m tessera watch demo --once
           python -m tessera audit demo

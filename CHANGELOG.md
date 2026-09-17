@@ -2,6 +2,16 @@
 
 All notable changes to Tessera are recorded here.
 
+## 1.1.1 — 2026-09-17
+
+### Fixed
+
+- `tessera adopt demo` reported that nothing was installed. The simulated
+  server did not answer the shell glob that adoption uses to discover a VPN
+  (`ls -1 /etc/wireguard/*.conf`), so the headline feature of 1.1.0 could not
+  be tried before using it on a real machine. Real servers were unaffected;
+  the evaluation path was not.
+
 ## 1.1.0 — 2026-09-17
 
 The theme is **continuity**: taking over a VPN you already run, keeping it when

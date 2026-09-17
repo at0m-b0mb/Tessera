@@ -162,6 +162,46 @@ def test_openvpn_adoption_flags_compression():
     print("  openvpn: 2 certs (1 revoked), flagged compression + missing CRL")
 
 
+def test_adopt_works_against_the_simulated_server():
+    """The demo must be able to demonstrate the headline feature.
+
+    adopt discovers an install with `ls -1 /etc/wireguard/*.conf`. The
+    simulator did not answer globs, so `tessera adopt demo` reported that
+    nothing was there and anyone evaluating the feature concluded it did not
+    work.
+    """
+    import tempfile
+
+    os.environ["TESSERA_CONFIG_DIR"] = tempfile.mkdtemp(prefix="tessera-demo-")
+    from tessera.core import demo
+    from tessera.core import interview as iv
+    from tessera.core.models import InstallSpec
+
+    demo.reset()
+    session = Session.connect(Target(host="demo"))
+    spec = iv.prepare(InstallSpec(), session.facts,
+                      engines=["wireguard"], first_peer="laptop")
+    report, _ = session.install(spec)
+    assert report.succeeded
+
+    # A server that has a VPN but no Tessera inventory: exactly what someone
+    # arriving from another installer has.
+    session.transport.files.pop("/etc/tessera/state.json", None)
+    session.transport._save()   # persist, or the next connect reloads it
+    fresh = Session.connect(Target(host="demo"))
+    assert fresh.state.installed_engines == []
+
+    found = fresh.discover()
+    assert "wireguard" in found, found
+    engines, _ = fresh.adopt(found)
+    assert engines == ["wireguard"]
+    assert len(fresh.list_peers("wireguard")) == 1
+
+    peer, _ = fresh.add_peer("wireguard", "after-adoption")
+    assert peer.address_v4
+    print("  demo: installed, inventory dropped, adopted back, peer added")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
@@ -169,7 +209,7 @@ if __name__ == "__main__":
         print(fn.__name__)
         try:
             fn()
-        except Exception as exc:                               # noqa: BLE001
+        except Exception:                                      # noqa: BLE001
             failed += 1
             import traceback; traceback.print_exc()
     print("\n{}/{} passed".format(len(tests) - failed, len(tests)))

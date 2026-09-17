@@ -83,6 +83,18 @@ class DemoTransport(Transport):
             sink=None, input_text: Optional[str] = None) -> CommandResult:
         self.commands.append(command)
         import re as _re
+        # `ls -1 /etc/wireguard/*.conf` is how adopt discovers an install.
+        # Without answering it from the virtual disk, the headline feature of
+        # this release cannot be tried on the demo server at all.
+        ls = _re.match(r"^ls -1 (\S+)\s*2?>?", command.strip())
+        if ls:
+            import fnmatch
+            pattern = ls.group(1).strip("'\"")
+            hits = sorted(f for f in self.files
+                          if fnmatch.fnmatch(f, pattern))
+            if hits:
+                return CommandResult(command, 0, "\n".join(hits) + "\n", "", 0.01)
+            return CommandResult(command, 1, "", "No such file", 0.01)
         dump = _re.search(r"wg show (\S+) dump", command)
         if dump:
             return CommandResult(

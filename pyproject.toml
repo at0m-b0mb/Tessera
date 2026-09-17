@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tessera-vpn"
-version = "1.1.0"
+version = "1.1.1"
 description = "Install, configure and remove WireGuard, OpenVPN and Tailscale on any Linux server - from any desktop."
 readme = "README.md"
 requires-python = ">=3.9"
