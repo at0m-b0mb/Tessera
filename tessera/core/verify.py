@@ -151,8 +151,15 @@ def _check_openvpn(t: Transport, state: ServerState) -> List[Finding]:
                         "{} is missing.".format(index),
                         "Certificates cannot be issued or revoked.",
                         engine="openvpn", weight=2)]
-    from .adopt import _parse_index
-    on_disk = _parse_index(t.run_root("cat {}".format(shlex.quote(index))).stdout)
+    from .adopt import _parse_ovpn_conf, _parse_index
+    # The server's own certificate is in index.txt too. Without excluding it,
+    # verify reports the server as a client it has never heard of - on every
+    # real install, not just an adopted one.
+    conf = t.run_root("cat /etc/openvpn/server/server.conf 2>/dev/null").stdout
+    server_cn = _parse_ovpn_conf(conf).get("cert_cn", "")
+    on_disk = _parse_index(
+        t.run_root("cat {}".format(shlex.quote(index))).stdout,
+        server_cn=server_cn)
     disk_active = {p["name"] for p in on_disk if not p["revoked"]}
     known_active = {p.get("name") for p in rec.peers if not p.get("revoked")}
 

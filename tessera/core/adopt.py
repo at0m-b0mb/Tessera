@@ -338,7 +338,12 @@ def _parse_index(body: str, server_cn: str = "") -> List[Dict]:
         name = m.group(1).strip()
         if server_cn and name == server_cn:
             continue
-        if name.startswith("server_") or name.startswith("cn_"):
+        # Fallback when the caller could not tell us the server's CN. These
+        # are the shapes the common installers use for the *server* cert -
+        # including Tessera's own "tessera_<random>", whose absence here is
+        # what let the server show up as a rogue client.
+        if (name.startswith("server_") or name.startswith("cn_")
+                or name.startswith("tessera_")):
             continue
         peers.append({
             "name": name,

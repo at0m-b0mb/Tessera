@@ -77,10 +77,15 @@ def test_fleet_holds_no_secrets():
     body = open(fleet.path()).read().lower()
     for word in ("password", "passphrase", "privatekey", "secret", "token"):
         assert word not in body, "server book must never hold {}".format(word)
-    import stat
-    mode = stat.S_IMODE(os.stat(fleet.path()).st_mode)
-    assert mode == 0o600, oct(mode)
-    print("  no credential fields, mode 0600")
+    if os.name == "posix":
+        import stat
+        mode = stat.S_IMODE(os.stat(fleet.path()).st_mode)
+        assert mode == 0o600, oct(mode)
+        print("  no credential fields, mode 0600")
+    else:
+        # Windows uses ACLs, not mode bits; os.stat reports 0o666 regardless,
+        # so asserting on it would be testing the emulation, not the file.
+        print("  no credential fields (mode check is POSIX-only)")
 
 
 # --------------------------------------------------------------------------- #
@@ -248,6 +253,39 @@ def test_verify_catches_a_hand_edited_peer():
     assert s.apply_fix() == ["imported sneaky"]
     assert not [f for f in s.verify() if f.is_problem]
     print("  unknown peer detected, imported, drift cleared")
+
+
+def test_verify_does_not_flag_the_server_certificate():
+    """Was: the server's own cert was reported as an unknown client.
+
+    index.txt contains the server certificate alongside the clients. verify
+    parsed it without excluding the server's CN, so every real OpenVPN install
+    reported a rogue certificate it had "never heard of" - the server itself.
+    """
+    from tessera.core import verify as verify_mod
+    conf = ("port 1194\nproto udp\ncert tessera_abc123.crt\n"
+            "key tessera_abc123.key\ncrl-verify crl.pem\n"
+            "tls-crypt-v2 tls-crypt-v2.key\ncipher AES-256-GCM\n")
+    index = ("V\t350101000000Z\t\t01\tunknown\t/CN=tessera_abc123\n"
+             "V\t280101000000Z\t\t02\tunknown\t/CN=laptop\n")
+    t = FakeTransport(files={
+        "/etc/openvpn/server/server.conf": conf,
+        "/etc/openvpn/server/easy-rsa/pki/index.txt": index})
+    state = ServerState()
+    from tessera.core.state import EngineRecord
+    state.set_engine(EngineRecord(
+        engine="openvpn",
+        peers=[{"name": "laptop", "engine": "openvpn", "revoked": False}]))
+    findings = verify_mod._check_openvpn(t, state)
+    unknown = [f for f in findings if "does not list" in f.title]
+    assert not unknown, [f.detail for f in unknown]
+
+    # And a genuinely unknown client is still caught.
+    t.files["/etc/openvpn/server/easy-rsa/pki/index.txt"] = index + (
+        "V\t280101000000Z\t\t03\tunknown\t/CN=stranger\n")
+    findings = verify_mod._check_openvpn(t, state)
+    assert any("stranger" in (f.detail or "") for f in findings), findings
+    print("  server cert ignored, real stranger still reported")
 
 
 def test_verify_never_grants_access():

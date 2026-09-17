@@ -67,6 +67,9 @@ and Back up on the dashboard.
   the demo path built an empty inventory instead of loading one.
 - `verify` reported files as missing on a healthy demo server.
 - `status` showed raw public keys where `watch` showed device names.
+- `verify` reported the OpenVPN server's own certificate as an unknown client
+  on every install, because the server CN was not excluded when reading
+  `index.txt`.
 
 ### Security
 

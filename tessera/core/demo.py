@@ -151,6 +151,34 @@ class DemoTransport(Transport):
             if path.startswith("/dev/"):
                 continue
             self.files.setdefault(path, "# created by the simulated server\n")
+        # Easy-RSA's PKI is produced by running ./easyrsa, which the demo does
+        # not execute. Without modelling the files it leaves behind, `verify
+        # demo` correctly reports a missing PKI - which is true of the
+        # simulation and false of the thing it is simulating.
+        if "easyrsa" in command and ("init-pki" in command or "build-ca" in command):
+            base = "/etc/openvpn/server/easy-rsa"
+            self.files.setdefault(base + "/easyrsa", "#!/bin/sh\n")
+            self.files.setdefault(base + "/TESSERA_SERVER_NAME",
+                                  "tessera_demoserver01\n")
+            self.files.setdefault(base + "/pki/ca.crt", _demo_certificate())
+            self.files.setdefault(
+                base + "/pki/index.txt",
+                "V\t350101000000Z\t\t01\tunknown\t/CN=tessera_demoserver01\n")
+            self.files.setdefault(base + "/pki/crl.pem", "")
+        # A signed client certificate lands in the index, so `peer list` and
+        # `verify` agree with each other afterwards.
+        m_sign = re.search(r"sign-req client (\S+)", command)
+        if m_sign:
+            name = m_sign.group(1).strip("'\"")
+            index = "/etc/openvpn/server/easy-rsa/pki/index.txt"
+            serial = "{:02X}".format(
+                len(self.files.get(index, "").splitlines()) + 1)
+            self.files[index] = self.files.get(index, "") + (
+                "V\t280101000000Z\t\t{}\tunknown\t/CN={}\n".format(serial, name))
+            self.files.setdefault(
+                "/etc/openvpn/server/easy-rsa/pki/issued/{}.crt".format(name),
+                _demo_certificate())
+
         # `mkdir -p` makes directories the inventory later looks for.
         for chunk in re.findall(r"mkdir -p ([^&|;\n]+)", command):
             for part in chunk.split():
@@ -160,24 +188,56 @@ class DemoTransport(Transport):
         self._save()
 
     def _apply_removals(self, command: str) -> None:
-        """Honour rm/shred against the virtual disk.
+        """Honour rm/shred/rmdir against the virtual disk.
 
-        Without this the uninstaller would report success while the simulated
-        server still had every file, and 'tessera install demo' afterwards
-        would refuse because it looked like a VPN was already there.
+        Only the arguments *to* those commands, not every path-shaped token in
+        a script that happens to contain one. The first version scanned the
+        whole command, so the OpenVPN signing step - which does `cd
+        .../easy-rsa` and later `rm -f ...req` - deleted the entire PKI, and
+        the demo then reported a missing CA that the real thing would have had.
         """
         import re
-        if not re.search(r"\b(rm|shred|rmdir)\b", command):
-            return
-        for token in re.findall(r"(/[\w./@-]+)", command):
-            for existing in list(self.files):
-                if existing == token or existing.startswith(token.rstrip("/") + "/"):
-                    self.files.pop(existing, None)
+        import shlex
+
+        # Split into statements the way a shell would, so `rm`'s arguments end
+        # where the next command begins.
+        for statement in re.split(r"(?:\n|&&|\|\||;|\|)", command):
+            statement = statement.strip()
+            if not statement:
+                continue
+            try:
+                words = shlex.split(statement)
+            except ValueError:
+                continue
+            if not words:
+                continue
+            # Skip `command -v shred >/dev/null` style guards.
+            while words and words[0] in ("command", "test", "[", "then", "do",
+                                         "(", "if"):
+                words = words[1:]
+            if not words or words[0] not in ("rm", "shred", "rmdir"):
+                continue
+            for arg in words[1:]:
+                if arg.startswith("-") or not arg.startswith("/"):
+                    continue
+                for existing in list(self.files):
+                    if existing == arg or existing.startswith(
+                            arg.rstrip("/") + "/"):
+                        self.files.pop(existing, None)
         self._save()
 
     def write_file(self, path: str, content: str, mode: str = "0600") -> None:
         self.files[path] = content
         self._save()
+
+    def read_file(self, path: str) -> str:
+        if path in self.files:
+            return self.files[path]
+        if path.endswith("ca.crt") or path.endswith(".crt"):
+            return _demo_certificate()
+        if path.endswith("TESSERA_SERVER_NAME"):
+            return "tessera_demoserver01\n"
+        return ""
 
     def _load(self) -> None:
         import json
@@ -209,17 +269,6 @@ class DemoTransport(Transport):
             os.replace(tmp, p)
         except Exception:                                      # noqa: BLE001
             pass
-
-    def read_file(self, path: str) -> str:
-        if path in self.files:
-            return self.files[path]
-        if path.endswith("ca.crt"):
-            return _demo_certificate()
-        if path.endswith("TESSERA_SERVER_NAME"):
-            return "tessera_demoserver01\n"
-        if path.endswith(".crt"):
-            return _demo_certificate()
-        return ""
 
     def file_exists(self, path: str) -> bool:
         if path in self.files:
